@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package gateway;
+
+option go_package = "github.com/bleasey/bdns/internal/proto/gatwaypb";
+
+// BlockHeader mirrors blockchain.BlockHeader for transmission to light nodes
+message BlockHeader {
+  int64 index       = 1;
+  int64 slot_number = 2;
+  bytes hash        = 3;
+  bytes prev_hash   = 4;
+  bytes merkle_root = 5;
+  bytes index_hash  = 6;
+}
+
+// MerkleProof carries the three fields required by blockchain.VerifyMerkleProof
+message MerkleProof {
+  bytes          tx_hash    = 1;
+  repeated bytes proof_path = 2;
+  repeated bool  directions = 3; // true = right sibling, false = left
+}
+
+message SubscribeRequest {
+  int64 start_index = 1; // resume from this chain height
+}
+
+message DomainQueryRequest {
+  string domain_name = 1;
+  int64  block_index = 2; // minimum confirmed height for the response
+}
+
+message DomainQueryResponse {
+  string      domain_name  = 1;
+  string      ip_address   = 2;
+  MerkleProof proof        = 3;
+  BlockHeader block_header = 4;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool  healthy      = 1;
+  int64 chain_height = 2;
+  int32 peer_count   = 3;
+}
+
+// BDNSGateway is the gRPC service exposed by full nodes to light nodes
+service BDNSGateway {
+  rpc SubscribeHeaders(SubscribeRequest)  returns (stream BlockHeader);
+  rpc QueryDomain(DomainQueryRequest)     returns (DomainQueryResponse);
+  rpc HealthCheck(HealthCheckRequest)     returns (HealthCheckResponse);
+}
