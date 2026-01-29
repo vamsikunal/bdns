@@ -15,7 +15,8 @@ import (
 
 type Block struct {
 	Index          int64
-	Timestamp      int64
+	Timestamp      int64  // Not Required
+	SlotNumber     int64  // Discrete slot identifier for deterministic timing
 	SlotLeader     []byte
 	Signature      []byte
 	IndexHash      []byte
@@ -26,10 +27,11 @@ type Block struct {
 	Hash           []byte
 }
 
-func NewBlock(index int64, slotLeader []byte, indexHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
+func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
 	block := &Block{
 		Index:        index,
 		Timestamp:    time.Now().Unix(),
+		SlotNumber:   slotNumber, // Set slot number
 		SlotLeader:   slotLeader,
 		IndexHash:    indexHash,
 		Transactions: transactions,
@@ -139,6 +141,7 @@ func (b *Block) SerializeForSigning() []byte {
 		[][]byte{
 			IntToByteArr(b.Index),
 			IntToByteArr(b.Timestamp),
+			IntToByteArr(b.SlotNumber), // Include SlotNumber
 			b.SlotLeader,
 			b.IndexHash,
 			b.MerkleRootHash,
@@ -167,6 +170,7 @@ func NewGenesisBlock(slotLeader []byte, privateKey *ecdsa.PrivateKey, registryKe
 	genesisBlock := Block{
 		Index:          0,
 		Timestamp:      time.Now().Unix(),
+		SlotNumber:     0,
 		SlotLeader:     slotLeader,
 		Signature:      []byte{},
 		IndexHash:      []byte{},
@@ -190,6 +194,7 @@ func (b *Block) ComputeHash() []byte {
 		[][]byte{
 			IntToByteArr(b.Index),
 			IntToByteArr(b.Timestamp),
+			IntToByteArr(b.SlotNumber),
 			b.SlotLeader,
 			b.Signature,
 			b.IndexHash,
@@ -274,8 +279,12 @@ func ValidateGenesisBlock(block *Block, registryKeys [][]byte, slotLeaderKey []b
 	return true
 }
 
-func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte) bool {
+func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expiryChecker ExpiryChecker) bool {
 	if oldBlock.Index+1 != newBlock.Index {
+		return false
+	}
+
+	if newBlock.SlotNumber <= oldBlock.SlotNumber {
 		return false
 	}
 
