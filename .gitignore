@@ -1,2 +1,6 @@
 chaindata
 /bin
+*.md
+!README.md
+*.txt
+/docs
