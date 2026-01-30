@@ -31,7 +31,7 @@ func SimpleSim() {
 		domainName := fmt.Sprintf("node%d.com", i+1)
 		ip := fmt.Sprintf("192.168.1.%d", i+1)
 		ttl := int64(3600)
-		tx := blockchain.NewTransaction(blockchain.REGISTER, domainName, ip, ttl, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
+		tx := blockchain.NewTransaction(blockchain.REGISTER, domainName, ip, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
 		node.BroadcastTransaction(*tx)
 		fmt.Printf("Node %d sent transaction for domain %s\n", i+1, tx.DomainName)
 	}
