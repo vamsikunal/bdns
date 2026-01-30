@@ -32,7 +32,7 @@ type BDNSResponse struct {
 	Timestamp  int64
 	DomainName string
 	IP         string
-	TTL        int64
+	CacheTTL   int64
 	OwnerKey   []byte
 	Signature  []byte
 }

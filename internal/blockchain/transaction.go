@@ -21,14 +21,16 @@ const (
 )
 
 type Transaction struct {
-	TID        int
-	Type       TransactionType
-	Timestamp  int64
-	DomainName string
-	IP         string
-	TTL        int64
-	OwnerKey   []byte
-	Signature  []byte
+	TID         int
+	Type        TransactionType
+	Timestamp   int64
+	DomainName  string
+	IP          string
+	CacheTTL    int64  // How long resolvers should cache (seconds)
+	ExpirySlot  int64  // Slot number when domain registration expires
+	RedeemsTxID int    // For UPDATE/REVOKE - references previous tx (0 for REGISTER)
+	OwnerKey    []byte
+	Signature   []byte
 }
 
 func NewTransaction(txType TransactionType, domainName, ip string, ttl int64, ownerKey []byte,
@@ -39,7 +41,7 @@ func NewTransaction(txType TransactionType, domainName, ip string, ttl int64, ow
 		Timestamp:  time.Now().Unix(),
 		DomainName: domainName,
 		IP:         ip,
-		TTL:        ttl,
+		CacheTTL:   ttl,
 		OwnerKey:   ownerKey,
 		Signature:  nil,
 	}
@@ -103,7 +105,9 @@ func (tx *Transaction) SerializeForSigning() []byte {
 	txData = append(txData, IntToByteArr(tx.Timestamp)...)
 	txData = append(txData, []byte(tx.DomainName)...)
 	txData = append(txData, []byte(tx.IP)...)
-	txData = append(txData, IntToByteArr(tx.TTL)...)
+	txData = append(txData, IntToByteArr(tx.CacheTTL)...)
+	txData = append(txData, IntToByteArr(tx.ExpirySlot)...)
+	txData = append(txData, IntToByteArr(int64(tx.RedeemsTxID))...)
 	txData = append(txData, tx.OwnerKey...)
 
 	return txData

@@ -62,7 +62,9 @@ func (tx *Transaction) PrintTx() {
 	fmt.Printf("Timestamp: %d\n", tx.Timestamp)
 	fmt.Printf("DomainName: %s\n", tx.DomainName)
 	fmt.Printf("IP: %s\n", tx.IP)
-	fmt.Printf("TTL: %d\n", tx.TTL)
+	fmt.Printf("CacheTTL: %d\n", tx.CacheTTL)
+	fmt.Printf("ExpirySlot: %d\n", tx.ExpirySlot)
+	fmt.Printf("RedeemsTxID: %d\n", tx.RedeemsTxID)
 	fmt.Printf("OwnerKey: %s\n", tx.OwnerKey)
 	fmt.Printf("Signature: %d\n\n", tx.Signature)
 }
