@@ -80,7 +80,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					domain := fmt.Sprintf("tx%d-node%d.com", len(domains), id+1)
 					ip := fmt.Sprintf("10.0.%d.%d", id+1, rand.Intn(255))
 					ttl := int64(3600)
-					tx := blockchain.NewTransaction(blockchain.REGISTER, domain, ip, ttl, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
+					tx := blockchain.NewTransaction(blockchain.REGISTER, domain, ip, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
 					node.BroadcastTransaction(*tx)
 					fmt.Printf("Node %d sent transaction for domain %s\n", id+1, domain)
 					domains = append(domains, domain) // assuming for simplicity, the tx was accepted

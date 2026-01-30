@@ -33,17 +33,28 @@ type Transaction struct {
 	Signature   []byte
 }
 
-func NewTransaction(txType TransactionType, domainName, ip string, ttl int64, ownerKey []byte,
-	privateKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
+func NewTransaction(txType TransactionType, domainName, ip string, cacheTTL int64,
+	currentSlot int64, slotsPerDay int64, redeemsTxID int,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
+	
 	tx := Transaction{
-		TID:        GenerateRandomTxID(txPool),
-		Type:       txType,
-		Timestamp:  time.Now().Unix(),
-		DomainName: domainName,
-		IP:         ip,
-		CacheTTL:   ttl,
-		OwnerKey:   ownerKey,
-		Signature:  nil,
+		TID:         GenerateRandomTxID(txPool),
+		Type:        txType,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		IP:          ip,
+		CacheTTL:    cacheTTL,
+		RedeemsTxID: redeemsTxID, // transaction ID being redeemed (0 for REGISTER, required for UPDATE/REVOKE)
+		OwnerKey:    ownerKey,
+		Signature:   nil,
+	}
+
+	// Calculate expiry for REGISTER (1 year = 365 * slotsPerDay (number of slots per day (for expiry calculation)))
+	if txType == REGISTER {
+		// currentSlot: current slot number (for calculating ExpirySlot)
+		// TODO: It can be made variable, but for now it is fixed.
+		tx.ExpirySlot = currentSlot + (365 * slotsPerDay) // Default 1 year validity 
+		tx.RedeemsTxID = 0 // REGISTER doesn't redeem anything
 	}
 
 	tx.Signature = SignTransaction(privateKey, &tx)
