@@ -141,6 +141,45 @@ func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64
 	return false
 }
 
+// ValidateRedemption ensures UPDATE/REVOKE transactions properly redeem a previous transaction
+func ValidateRedemption(tx *Transaction, blockchain *Blockchain) bool {
+	if tx.Type == REGISTER {
+		return true
+	}
+
+	if tx.RedeemsTxID == 0 {
+		log.Println("UPDATE/REVOKE must redeem a previous transaction")
+		return false
+	}
+
+	// Check if already redeemed (double-spend prevention)
+	if blockchain.IsSpent(tx.RedeemsTxID) {
+		log.Println("Transaction already redeemed:", tx.RedeemsTxID)
+		return false
+	}
+
+	// Find the redeemed transaction
+	prevTx, err := blockchain.FindTransaction(tx.RedeemsTxID)
+	if err != nil {
+		log.Println("Redeemed transaction not found:", tx.RedeemsTxID)
+		return false
+	}
+
+	// Verify domain name matches
+	if prevTx.DomainName != tx.DomainName {
+		log.Println("Domain name mismatch in redemption")
+		return false
+	}
+
+	// Verify ownership
+	if !bytes.Equal(prevTx.OwnerKey, tx.OwnerKey) {
+		log.Println("Owner key mismatch in redemption")
+		return false
+	}
+
+	return true
+}
+
 func (tx *Transaction) SerializeForSigning() []byte {
 	txData := append(IntToByteArr(int64(tx.TID)), byte(tx.Type))
 	txData = append(txData, IntToByteArr(tx.Timestamp)...)
