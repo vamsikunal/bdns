@@ -88,7 +88,8 @@ func SignTransaction(privateKey *ecdsa.PrivateKey, tx *Transaction) []byte {
 	return signature
 }
 
-func VerifyTransaction(publicKeyBytes []byte, tx *Transaction) bool {
+// Function to verify the ECDSA signature on a transaction
+func VerifySignature(publicKeyBytes []byte, tx *Transaction) bool {
 	publicKey, err := BytesToPublicKey(publicKeyBytes)
 	if err != nil {
 		log.Println("Invalid public key format")
@@ -109,6 +110,35 @@ func VerifyTransaction(publicKeyBytes []byte, tx *Transaction) bool {
 	s := new(big.Int).SetBytes(tx.Signature[32:])
 
 	return ecdsa.Verify(publicKey, hash[:], r, s)
+}
+
+// VerifyTransaction validates a transaction based on its type
+func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64) bool {
+	switch tx.Type {
+	case REGISTER:
+		if !IsRegistryKey(tx.OwnerKey) {
+			log.Println("REGISTER not signed by trusted registry")
+			return false
+		}
+		return VerifySignature(tx.OwnerKey, tx)
+
+	case UPDATE:
+		return VerifySignature(publicKeyBytes, tx)
+
+	case REVOKE:
+		// System transaction (auto-revocation) have no signature and are validated by expiry check
+		if tx.Signature == nil && tx.OwnerKey == nil {
+			if tx.ExpirySlot <= currentSlot {
+				return true
+			}
+			log.Println("Invalid auto-revocation: domain not expired")
+			return false
+		}
+		// Manual revocation
+		return VerifySignature(publicKeyBytes, tx)
+	}
+
+	return false
 }
 
 func (tx *Transaction) SerializeForSigning() []byte {
