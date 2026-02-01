@@ -10,6 +10,7 @@ import (
 
 const dbFile = "chaindata/blockchain_%s.db"
 const blocksBucket = "blocks"
+const spentTxsBucket = "spent_txs"
 
 // Blockchain implements interactions with a DB
 type Blockchain struct {
@@ -36,6 +37,12 @@ func CreateBlockchain(chainID string) *Blockchain {
 
 	err = db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucket([]byte(blocksBucket))
+		if err != nil {
+			log.Panic(err)
+		}
+
+		// Create spent transactions bucket
+		_, err = tx.CreateBucket([]byte(spentTxsBucket))
 		if err != nil {
 			log.Panic(err)
 		}
@@ -244,4 +251,25 @@ func (bc *Blockchain) GetBlocksFrom(startHeight int) []*Block {
 	}
 
 	return blocks
+}
+
+// MarkAsSpent marks a transaction ID as spent (redeemed)
+func (bc *Blockchain) MarkAsSpent(txID int) error {
+	return bc.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(spentTxsBucket))
+		key := IntToByteArr(int64(txID))
+		return b.Put(key, []byte{1})
+	})
+}
+
+// IsSpent checks if a transaction ID has already been redeemed
+func (bc *Blockchain) IsSpent(txID int) bool {
+	var spent bool
+	bc.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(spentTxsBucket))
+		key := IntToByteArr(int64(txID))
+		spent = b.Get(key) != nil
+		return nil
+	})
+	return spent
 }
