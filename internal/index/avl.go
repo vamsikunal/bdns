@@ -183,18 +183,43 @@ func (n *AVLNode) findSmallest() *AVLNode {
 	return n
 }
 
-// Compute hash for AVL tree node
-func ComputeIndexNodeHash(node *AVLNode) []byte {
-	if node == nil {
-		return nil
+// Compute hash for AVL tree node (DEPRECATED: use IndexManager.ComputeIndexHash for deterministic hashing)
+// func ComputeIndexNodeHash(node *AVLNode) []byte {
+// 	if node == nil {
+// 		return nil
+// 	}
+
+// 	leftHash := ComputeIndexNodeHash(node.left)
+// 	rightHash := ComputeIndexNodeHash(node.right)
+// 	data := append([]byte(node.key+strconv.Itoa(node.value.TID)), leftHash...)
+// 	data = append(data, rightHash...)
+
+// 	hash := sha256.Sum256(data)
+
+// 	return hash[:]
+// }
+
+// DomainRecord represents a domain-IP pair for deterministic hashing
+type DomainRecord struct {
+	Domain string
+	IP     string
+}
+
+// GetAllRecords performs in-order traversal to extract all active domain records
+func (t *AVLTree) GetAllRecords() []DomainRecord {
+	var records []DomainRecord
+	t.root.inOrderTraversal(&records)
+	return records
+}
+
+func (n *AVLNode) inOrderTraversal(records *[]DomainRecord) {
+	if n == nil {
+		return
 	}
-
-	leftHash := ComputeIndexNodeHash(node.left)
-	rightHash := ComputeIndexNodeHash(node.right)
-	data := append([]byte(node.key+strconv.Itoa(node.value.TID)), leftHash...)
-	data = append(data, rightHash...)
-
-	hash := sha256.Sum256(data)
-
-	return hash[:]
+	n.left.inOrderTraversal(records)
+	*records = append(*records, DomainRecord{
+		Domain: n.value.DomainName,
+		IP:     n.value.IP,
+	})
+	n.right.inOrderTraversal(records)
 }
