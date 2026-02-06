@@ -3,6 +3,7 @@ package index
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 
 	"github.com/bleasey/bdns/internal/blockchain"
 )
@@ -36,8 +37,26 @@ func (im *IndexManager) GetIP(domain string) *blockchain.Transaction {
 	return targetNode.value
 }
 
+// GetIndexHash computes a DETERMINISTIC index hash regardless of tree structure
 func (im *IndexManager) GetIndexHash() []byte {
-	return ComputeIndexNodeHash(im.tree.root)
+	records := im.tree.GetAllRecords()
+	if len(records) == 0 {
+		return nil
+	}
+
+	// Sort alphabetically by domain and Serialize 
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Domain < records[j].Domain
+	})
+
+	var data []byte
+	for _, r := range records {
+		data = append(data, []byte(r.Domain+":"+r.IP+"\n")...)
+	}
+
+	// Hash the data
+	hash := sha256.Sum256(data)
+	return hash[:]
 }
 
 func (im *IndexManager) Add(domain string, tx *blockchain.Transaction) {
