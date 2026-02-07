@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"log"
 
 	"github.com/bleasey/bdns/internal/blockchain"
@@ -43,10 +44,45 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 	blockchain.RemoveTxsFromPool(block.Transactions, n.TransactionPool)
 	n.TxMutex.Unlock()
 
-	// Add block to blockchain
+	// Validate IndexHash after applying transactions
+	expectedHash := n.IndexManager.GetIndexHash()
+	if !bytes.Equal(block.IndexHash, expectedHash) {
+		log.Println("IndexHash mismatch - rejecting block and rolling back at", n.Address)
+		// ROLLBACK: Reverse the transactions we just applied
+		n.TxMutex.Lock()
+		n.rollbackTransactions(block.Transactions)
+		n.TxMutex.Unlock()
+		return
+	}
+
+	// ATOMIC: Lock mutex for BOTH AddBlock AND MarkAsSpent
 	n.BcMutex.Lock()
-	defer n.BcMutex.Unlock()
 	n.Blockchain.AddBlock(block)
+
+	// Mark spent TxIDs
+	for _, tx := range block.Transactions {
+		if tx.Type == blockchain.UPDATE ||
+			(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
+			n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
+		}
+	}
+	n.BcMutex.Unlock()
+}
+
+// rollbackTransactions reverses applied transactions on validation failure
+func (n *Node) rollbackTransactions(transactions []blockchain.Transaction) {
+	// Reverse iterate and undo each operation
+	for i := len(transactions) - 1; i >= 0; i-- {
+		tx := transactions[i]
+		switch tx.Type {
+		case blockchain.REGISTER:
+			n.IndexManager.Remove(tx.DomainName)
+		case blockchain.UPDATE:
+			log.Println("Warning: UPDATE rollback - domain state may be inconsistent:", tx.DomainName)
+		case blockchain.REVOKE:
+			log.Println("Warning: REVOKE rollback - cannot restore domain:", tx.DomainName)
+		}
+	}
 }
 
 func (n *Node) AddTransaction(tx *blockchain.Transaction) {
