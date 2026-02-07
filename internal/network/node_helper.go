@@ -12,22 +12,31 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 
 	// Verify received block
 	if (block.Index == 0 && !blockchain.ValidateGenesisBlock(block, n.RegistryKeys, slotLeader)) ||
-		(block.Index != 0 && !blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(), slotLeader)) {
+		(block.Index != 0 && !blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(), slotLeader, n.IndexManager)) {
 		log.Println("Invalid block received at ", n.Address)
 		return
 	}
 
 	// Update index tree
 	n.TxMutex.Lock()
-	for _, tx := range block.Transactions {
+	for i := range block.Transactions {
+		tx := &block.Transactions[i]
 		switch tx.Type {
 		case blockchain.REGISTER:
-			n.IndexManager.Add(tx.DomainName, &tx)
+			n.IndexManager.Add(tx.DomainName, tx, block.Index, i)
 
 		case blockchain.UPDATE:
-			n.IndexManager.Update(tx.DomainName, &tx)
+			// Remove old tx from expiry index before updating
+			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+				n.IndexManager.RemoveFromExpiryIndex(oldTx)
+			}
+			n.IndexManager.Update(tx.DomainName, tx)
 
 		case blockchain.REVOKE:
+			// Remove from expiry index before removing from tree
+			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+				n.IndexManager.RemoveFromExpiryIndex(oldTx)
+			}
 			n.IndexManager.Remove(tx.DomainName)
 		}
 	}
