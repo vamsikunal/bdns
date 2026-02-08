@@ -350,3 +350,94 @@ type BlockHeader struct {
 func (b *Block) State() []byte {
 	return b.PrevHash
 }
+
+// GenerateMerkleProof creates a compact Merkle proof for a transaction at the given index
+func (b *Block) GenerateMerkleProof(txIndex int) *MerkleProof {
+	if txIndex < 0 || txIndex >= len(b.Transactions) {
+		return nil
+	}
+
+	// Build leaf hashes
+	var leaves [][]byte
+	for _, tx := range b.Transactions {
+		txBytes := tx.Serialize()
+		hash := sha256.Sum256(txBytes)
+		leaves = append(leaves, hash[:])
+	}
+
+	txHash := make([]byte, len(leaves[txIndex]))
+	copy(txHash, leaves[txIndex])
+
+	// Build proof path from leaf to root
+	var proofPath [][]byte
+	var directions []bool
+	index := txIndex
+	level := leaves
+
+	for len(level) > 1 {
+		// Pad if odd number of nodes
+		if len(level)%2 != 0 {
+			dup := make([]byte, len(level[len(level)-1]))
+			copy(dup, level[len(level)-1])
+			level = append(level, dup)
+		}
+
+		// Record sibling hash
+		if index%2 == 0 {
+			sibling := make([]byte, len(level[index+1]))
+			copy(sibling, level[index+1])
+			proofPath = append(proofPath, sibling)
+			directions = append(directions, true) // sibling on right
+		} else {
+			sibling := make([]byte, len(level[index-1]))
+			copy(sibling, level[index-1])
+			proofPath = append(proofPath, sibling)
+			directions = append(directions, false) // sibling on left
+		}
+
+		// Build next level
+		var nextLevel [][]byte
+		for i := 0; i < len(level); i += 2 {
+			combined := append(level[i], level[i+1]...)
+			hash := sha256.Sum256(combined)
+			h := make([]byte, len(hash))
+			copy(h, hash[:])
+			nextLevel = append(nextLevel, h)
+		}
+
+		level = nextLevel
+		index = index / 2
+	}
+
+	return &MerkleProof{
+		TxHash:     txHash,
+		ProofPath:  proofPath,
+		Directions: directions,
+		MerkleRoot: level[0],
+	}
+}
+
+// VerifyMerkleProof verifies that a Merkle proof is valid
+func VerifyMerkleProof(proof *MerkleProof) bool {
+	if proof == nil {
+		return false
+	}
+
+	currentHash := make([]byte, len(proof.TxHash))
+	copy(currentHash, proof.TxHash)
+
+	for i, sibling := range proof.ProofPath {
+		var combined []byte
+		if proof.Directions[i] {
+			// sibling is on right
+			combined = append(currentHash, sibling...)
+		} else {
+			// sibling is on left
+			combined = append(sibling, currentHash...)
+		}
+		hash := sha256.Sum256(combined)
+		currentHash = hash[:]
+	}
+
+	return bytes.Equal(currentHash, proof.MerkleRoot)
+}

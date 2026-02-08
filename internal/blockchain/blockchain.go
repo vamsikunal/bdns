@@ -273,3 +273,22 @@ func (bc *Blockchain) IsSpent(txID int) bool {
 	})
 	return spent
 }
+
+// GetBlockByIndex finds a block by its index (height) and returns it
+func (bc *Blockchain) GetBlockByIndex(index int64) *Block {
+	bci := bc.Iterator()
+
+	for {
+		block := bci.Next()
+
+		if block.Index == index {
+			return block
+		}
+
+		if block.Index == 0 {
+			break
+		}
+	}
+
+	return nil
+}
