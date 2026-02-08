@@ -327,3 +327,26 @@ func (b *Block) ValidateTransactions() bool {
 	}
 	return true
 }
+
+// MerkleProof contains the data needed for a light node to verify transaction inclusion
+type MerkleProof struct {
+	TxHash     []byte
+	ProofPath  [][]byte
+	Directions []bool // true = right sibling, false = left sibling
+	MerkleRoot []byte
+}
+
+// BlockHeader is a lightweight representation for light nodes
+type BlockHeader struct {
+	Index      int64
+	SlotNumber int64
+	Hash       []byte
+	PrevHash   []byte
+	MerkleRoot []byte
+	IndexHash  []byte
+}
+
+// State returns the state st_j = H(B_{j-1})
+func (b *Block) State() []byte {
+	return b.PrevHash
+}
