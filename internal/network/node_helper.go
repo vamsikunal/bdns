@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"log"
+	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
 )
@@ -11,7 +12,7 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 	epoch := (block.Timestamp - n.Config.InitialTimestamp) / (n.Config.SlotInterval * n.Config.SlotsPerEpoch)
 	slotLeader := n.GetSlotLeader(epoch)
 
-	// Verify received block
+	// Verify received block (pass IndexManager for expiration validation)
 	if (block.Index == 0 && !blockchain.ValidateGenesisBlock(block, n.RegistryKeys, slotLeader)) ||
 		(block.Index != 0 && !blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(), slotLeader, n.IndexManager)) {
 		log.Println("Invalid block received at ", n.Address)
@@ -134,16 +135,141 @@ func (n *Node) HandleGetBlock(sender string) {
 	log.Printf("[GETBLOCK] %s sent recent blocks to %s\n", n.Address, sender)
 }
 
-// HandleMerkleRequest sends Merkle proof path for a record
-func (n *Node) HandleMerkleRequest(sender string) {
-	n.BcMutex.Lock()
-	defer n.BcMutex.Unlock()
+// HandleMerkleRequest sends a proper Merkle proof for a domain query
+func (n *Node) HandleMerkleRequest(sender string, domain string) {
+	n.TxMutex.Lock()
+	defer n.TxMutex.Unlock()
 
-	// Simplified: just sending full block instead of real Merkle path
-	// Ideally: compute Merkle root and proof path
-	latest := n.Blockchain.GetLatestBlock()
-	if latest != nil {
-		n.P2PNetwork.DirectMessage(MsgBlock, latest, sender)
-		log.Printf("[MERKLE] %s sent block with Merkle data to %s\n", n.Address, sender)
+	// Look up transaction location via IndexManager
+	loc := n.IndexManager.GetTxLocation(domain)
+	if loc == nil {
+		log.Printf("[MERKLE] Domain %s not found in index\n", domain)
+		return
+	}
+
+	n.BcMutex.Lock()
+	block := n.Blockchain.GetBlockByIndex(loc.BlockIndex)
+	n.BcMutex.Unlock()
+
+	if block == nil {
+		log.Printf("[MERKLE] Block %d not found\n", loc.BlockIndex)
+		return
+	}
+
+	proof := block.GenerateMerkleProof(loc.TxIndex)
+	if proof == nil {
+		log.Printf("[MERKLE] Failed to generate proof for tx at index %d\n", loc.TxIndex)
+		return
+	}
+
+	n.P2PNetwork.DirectMessage(MsgMerkleProof, proof, sender)
+	log.Printf("[MERKLE] %s sent Merkle proof for %s to %s\n", n.Address, domain, sender)
+}
+
+// DNSQueryMsg is sent by light nodes to request domain resolution with proof
+type DNSQueryMsg struct {
+	DomainName string
+}
+
+// DNSProofResponse contains the answer + cryptographic proof for light node verification
+type DNSProofResponse struct {
+	DomainName  string
+	IP          string
+	Transaction blockchain.Transaction
+	Proof       blockchain.MerkleProof
+	BlockHeader blockchain.BlockHeader
+}
+
+// HandleDNSQuery handles a DNS query from a light node (full node only)
+func (n *Node) HandleDNSQuery(sender string, query DNSQueryMsg) {
+	if !n.IsFullNode {
+		return
+	}
+
+	n.TxMutex.Lock()
+	tx := n.IndexManager.GetIP(query.DomainName)
+	if tx == nil {
+		n.TxMutex.Unlock()
+		log.Println("[DNS_QUERY] Domain not found:", query.DomainName)
+		return
+	}
+
+	loc := n.IndexManager.GetTxLocation(query.DomainName)
+	n.TxMutex.Unlock()
+
+	if loc == nil {
+		return
+	}
+
+	n.BcMutex.Lock()
+	block := n.Blockchain.GetBlockByIndex(loc.BlockIndex)
+	n.BcMutex.Unlock()
+
+	if block == nil {
+		return
+	}
+
+	proof := block.GenerateMerkleProof(loc.TxIndex)
+	if proof == nil {
+		return
+	}
+
+	response := DNSProofResponse{
+		DomainName:  query.DomainName,
+		IP:          tx.IP,
+		Transaction: *tx,
+		Proof:       *proof,
+		BlockHeader: block.Header(),
+	}
+	n.P2PNetwork.DirectMessage(MsgDNSProof, response, sender)
+	log.Printf("[DNS_QUERY] %s sent proof for %s to %s\n", n.Address, query.DomainName, sender)
+}
+
+// HandleDNSProof verifies a DNS proof received from a full node (light node only)
+func (n *Node) HandleDNSProof(response DNSProofResponse) {
+	if n.IsFullNode {
+		return
+	}
+
+	// Optimistic waiting: header might arrive slightly after proof 
+	header := n.waitForHeader(response.BlockHeader.Index, 2*time.Second)
+	if header == nil {
+		log.Println("[DNS_PROOF] Header not received after timeout, block:", response.BlockHeader.Index)
+		return
+	}
+
+	if !bytes.Equal(header.Hash, response.BlockHeader.Hash) {
+		log.Println("[DNS_PROOF] Block header hash mismatch — possible attack!")
+		return
+	}
+
+	// Verify Merkle proof against local header's root
+	response.Proof.MerkleRoot = header.MerkleRoot
+	if !blockchain.VerifyMerkleProof(&response.Proof) {
+		log.Println("[DNS_PROOF] Merkle proof verification failed — data tampered!")
+		return
+	}
+
+	// Verified! Cache the result
+	log.Printf("[DNS_PROOF] Verified: %s → %s (block #%d)\n",
+		response.DomainName, response.IP, response.BlockHeader.Index)
+	SetToCache(response.DomainName, response.IP)
+}
+
+// waitForHeader polls for a block header with a timeout (handles network lag)
+func (n *Node) waitForHeader(index int64, timeout time.Duration) *blockchain.BlockHeader {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 100 * time.Millisecond
+
+	for {
+		if int(index) < len(n.HeaderChain) {
+			return &n.HeaderChain[index]
+		}
+
+		if time.Now().After(deadline) {
+			return nil
+		}
+
+		time.Sleep(pollInterval)
 	}
 }

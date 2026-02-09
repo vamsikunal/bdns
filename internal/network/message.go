@@ -19,6 +19,9 @@ const (
 	MsgGetBlock      MessageType = "GET_BLOCK"
 	MsgGetData       MessageType = "GET_DATA"
 	MsgGetMerkle     MessageType = "GET_MERKLE"
+	MsgDNSQuery      MessageType = "DNS_QUERY"
+	MsgDNSProof      MessageType = "DNS_PROOF"
+	MsgMerkleProof   MessageType = "MERKLE_PROOF"
 )
 
 // Message represents a generic network message
