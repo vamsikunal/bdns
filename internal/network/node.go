@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -38,6 +39,7 @@ type Node struct {
 	IsFullNode      bool // full vs light node
 	PeerID          string
 	KnownFullPeers  []string
+	HeaderChain     []blockchain.BlockHeader // Light nodes store only headers
 }
 
 // Node Config
@@ -152,7 +154,26 @@ func (n *Node) HandleMsgGivenType(msg GossipMessage, _ *metrics.DNSMetrics) {
 		n.HandleGetBlock(msg.Sender)
 
 	case MsgGetMerkle:
-		n.HandleMerkleRequest(msg.Sender)
+		var query DNSQueryMsg
+		if err := json.Unmarshal(msg.Content, &query); err == nil {
+			n.HandleMerkleRequest(msg.Sender, query.DomainName)
+		}
+
+	case MsgDNSQuery:
+		var query DNSQueryMsg
+		err := json.Unmarshal(msg.Content, &query)
+		if err != nil {
+			log.Println("Failed to unmarshal DNS query:", err)
+		}
+		n.HandleDNSQuery(msg.Sender, query)
+
+	case MsgDNSProof:
+		var response DNSProofResponse
+		err := json.Unmarshal(msg.Content, &response)
+		if err != nil {
+			log.Println("Failed to unmarshal DNS proof:", err)
+		}
+		n.HandleDNSProof(response)
 	}
 }
 
@@ -215,13 +236,14 @@ func (n *Node) BroadcastRandomNumber(epoch int64) {
 func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *metrics.DNSMetrics) {
 	start := time.Now()
 
-	// If this node is a light node, forward the query to a known full node
+	// If this node is a light node, ask full node for answer + proof
 	if !n.IsFullNode {
-		fmt.Println("Light node forwarding DNS query for:", req.DomainName)
+		fmt.Println("Light node requesting DNS proof for:", req.DomainName)
+		query := DNSQueryMsg{DomainName: req.DomainName}
 		for _, peerID := range n.KnownFullPeers {
 			if peerID != reqSender {
-				n.P2PNetwork.DirectMessage(DNSRequest, req, peerID)
-				fmt.Println(" Light node forwarded query to:", peerID)
+				n.P2PNetwork.DirectMessage(MsgDNSQuery, query, peerID)
+				fmt.Println(" Light node sent DNS query to:", peerID)
 				if metrics != nil {
 					metrics.AddLightNodeForwardedResolution(time.Since(start))
 				}
@@ -244,7 +266,7 @@ func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *met
 			Timestamp:  tx.Timestamp,
 			DomainName: tx.DomainName,
 			IP:         tx.IP,
-			TTL:        tx.TTL,
+			CacheTTL:   tx.CacheTTL,
 			OwnerKey:   tx.OwnerKey,
 			Signature:  tx.Signature,
 		}
@@ -270,4 +292,16 @@ func (n *Node) RandomNumberHandler(epoch int64, sender string, secretValue int, 
 		SecretValue: secretValue,
 		RandomValue: randomValue,
 	}
+}
+
+// AddBlockHeader stores a block header for light nodes (chain extension with validation)
+func (n *Node) AddBlockHeader(header blockchain.BlockHeader) {
+	if len(n.HeaderChain) > 0 {
+		latest := n.HeaderChain[len(n.HeaderChain)-1]
+		if !bytes.Equal(header.PrevHash, latest.Hash) {
+			log.Println("Header doesn't extend chain, skipping")
+			return
+		}
+	}
+	n.HeaderChain = append(n.HeaderChain, header)
 }

@@ -351,6 +351,18 @@ func (b *Block) State() []byte {
 	return b.PrevHash
 }
 
+// extracts a lightweight header from a full block
+func (b *Block) Header() BlockHeader {
+	return BlockHeader{
+		Index:      b.Index,
+		SlotNumber: b.SlotNumber,
+		Hash:       b.Hash,
+		PrevHash:   b.PrevHash,
+		MerkleRoot: b.MerkleRootHash,
+		IndexHash:  b.IndexHash,
+	}
+}
+
 // GenerateMerkleProof creates a compact Merkle proof for a transaction at the given index
 func (b *Block) GenerateMerkleProof(txIndex int) *MerkleProof {
 	if txIndex < 0 || txIndex >= len(b.Transactions) {
