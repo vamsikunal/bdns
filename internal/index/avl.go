@@ -4,11 +4,9 @@
 package index
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"github.com/bleasey/bdns/internal/blockchain"
 	"math"
-	"strconv"
 )
 
 type AVLTree struct {

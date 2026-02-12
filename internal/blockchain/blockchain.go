@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/boltdb/bolt"
@@ -112,7 +113,22 @@ func (bc *Blockchain) AddBlock(block *Block) {
 			log.Panic(err)
 		}
 
-		// TODO: Chain comparison before adding block
+		// Chain comparison: only update tip if this block extends our chain
+		lastHash := b.Get([]byte("l"))
+		if lastHash != nil {
+			lastBlockData := b.Get(lastHash)
+			if lastBlockData != nil {
+				lastBlock := DeserializeBlock(lastBlockData)
+				if !bytes.Equal(block.PrevHash, lastBlock.Hash) {
+					log.Println("Block does not extend current chain tip, skipping tip update")
+					return nil
+				}
+				if block.Index != lastBlock.Index+1 {
+					log.Println("Block index gap detected, skipping tip update")
+					return nil
+				}
+			}
+		}
 		err = b.Put([]byte("l"), block.Hash)
 		if err != nil {
 			log.Panic(err)
