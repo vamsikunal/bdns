@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
@@ -83,22 +84,97 @@ func (n *Node) CreateBlockIfLeader() {
 
 		transactions := n.ChooseTxFromPool(blockTxLimit)
 
+		// Add auto-revocation transactions for expired domains
+		autoRevocations := n.GenerateAutoRevocations(slot)
+		transactions = append(transactions, autoRevocations...)
+
 		if len(transactions) == 0 {
 			fmt.Println("No transactions to add. Skipping block creation.")
 			continue
 		}
 
-		fmt.Println("Transactions in block:", len(transactions))
+		fmt.Println("Transactions in block:", len(transactions), "(Auto-revocations:", len(autoRevocations), ")")
 
 		n.BcMutex.Lock()
 		latestBlock := n.Blockchain.GetLatestBlock()
 		n.BcMutex.Unlock()
 
-		newBlock := blockchain.NewBlock(latestBlock.Index+1, currSlotLeader, nil, transactions, latestBlock.Hash, latestBlock.StakeData, &n.KeyPair.PrivateKey)
-		n.AddBlock(newBlock)
+		// Apply transactions to index BEFORE creating block (for IndexHash)
+		n.TxMutex.Lock()
+		for i := range transactions {
+			tx := &transactions[i]
+			switch tx.Type {
+			case blockchain.REGISTER:
+				n.IndexManager.Add(tx.DomainName, tx, latestBlock.Index+1, i)
+			case blockchain.UPDATE:
+				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+					n.IndexManager.RemoveFromExpiryIndex(oldTx)
+				}
+				n.IndexManager.Update(tx.DomainName, tx)
+			case blockchain.REVOKE:
+				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+					n.IndexManager.RemoveFromExpiryIndex(oldTx)
+				}
+				n.IndexManager.Remove(tx.DomainName)
+			}
+		}
+		n.TxMutex.Unlock()
+
+		// Compute IndexHash AFTER applying transactions
+		indexHash := n.IndexManager.GetIndexHash()
+
+		// Create block WITH IndexHash
+		newBlock := blockchain.NewBlock(latestBlock.Index+1, slot, currSlotLeader, indexHash, transactions, latestBlock.Hash, latestBlock.StakeData, &n.KeyPair.PrivateKey)
+
+		// ATOMIC: Add block AND mark spent under same lock
+		n.BcMutex.Lock()
+		n.Blockchain.AddBlock(newBlock)
+
+		// Mark spent TxIDs (inside same lock for atomicity)
+		for _, tx := range transactions {
+			if tx.Type == blockchain.UPDATE ||
+				(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
+				n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
+			}
+		}
+		n.BcMutex.Unlock()
+
+		// Broadcast to others (outside lock)
 		n.P2PNetwork.BroadcastMessage(MsgBlock, *newBlock, nil)
 		fmt.Print("Block ", newBlock.Index, " created and broadcasted by node ", n.Address, "\n\n")
 	}
+}
+
+// GenerateAutoRevocations creates REVOKE transactions for expired domains
+func (n *Node) GenerateAutoRevocations(currentSlot int64) []blockchain.Transaction {
+	expiredDomains := n.IndexManager.GetExpiredDomains(currentSlot)
+	if len(expiredDomains) == 0 {
+		return nil
+	}
+
+	// Sort alphabetically by domain name for deterministic ordering
+	sort.Slice(expiredDomains, func(i, j int) bool {
+		return expiredDomains[i].DomainName < expiredDomains[j].DomainName
+	})
+
+	revocations := make([]blockchain.Transaction, 0, len(expiredDomains))
+	for _, tx := range expiredDomains {
+		revokeTx := blockchain.Transaction{
+			TID:         tx.TID, 
+			Type:        blockchain.REVOKE,
+			Timestamp:   0,
+			DomainName:  tx.DomainName,
+			IP:          "",
+			CacheTTL:    0,
+			ExpirySlot:  tx.ExpirySlot,
+			RedeemsTxID: tx.TID, // Redeems the original registration
+			OwnerKey:    nil,    // No owner key - system transaction
+			Signature:   nil,    // No signature - validated by expiry check
+		}
+		revocations = append(revocations, revokeTx)
+	}
+
+	return revocations
 }
 
 func (n *Node) ChooseTxFromPool(limit int) []blockchain.Transaction {

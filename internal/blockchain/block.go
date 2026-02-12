@@ -316,12 +316,35 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 		return false
 	}
 
+	// Validate all required expirations are present in the block
+	if expiryChecker != nil {
+		expectedExpirations := expiryChecker.GetExpiredDomains(newBlock.SlotNumber)
+		for _, expected := range expectedExpirations {
+			found := false
+			for _, tx := range newBlock.Transactions {
+
+				// Strict validation: check BOTH DomainName AND RedeemsTxID
+				
+				if tx.Type == REVOKE &&
+					tx.DomainName == expected.DomainName &&
+					tx.RedeemsTxID == expected.TID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				log.Println("Block missing required expiration:", expected.DomainName, "TID:", expected.TID)
+				return false
+			}
+		}
+	}
+
 	return true
 }
 
 func (b *Block) ValidateTransactions() bool {
 	for _, tx := range b.Transactions {
-		if !VerifyTransaction(tx.OwnerKey, &tx) {
+		if !VerifyTransaction(tx.OwnerKey, &tx, b.SlotNumber) {
 			return false
 		}
 	}
