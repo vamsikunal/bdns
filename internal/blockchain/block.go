@@ -279,7 +279,7 @@ func ValidateGenesisBlock(block *Block, registryKeys [][]byte, slotLeaderKey []b
 	return true
 }
 
-func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expiryChecker ExpiryChecker) bool {
+func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expiryChecker ExpiryChecker, slotsPerDay int64) bool {
 	if oldBlock.Index+1 != newBlock.Index {
 		return false
 	}
@@ -308,7 +308,7 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 		return false
 	}
 
-	if !newBlock.ValidateTransactions() {
+	if !newBlock.ValidateTransactions(slotsPerDay) {
 		return false
 	}
 
@@ -342,9 +342,9 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 	return true
 }
 
-func (b *Block) ValidateTransactions() bool {
+func (b *Block) ValidateTransactions(slotsPerDay int64) bool {
 	for _, tx := range b.Transactions {
-		if !VerifyTransaction(tx.OwnerKey, &tx, b.SlotNumber) {
+		if !VerifyTransaction(tx.OwnerKey, &tx, b.SlotNumber, slotsPerDay) {
 			return false
 		}
 	}

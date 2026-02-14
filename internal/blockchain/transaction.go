@@ -18,6 +18,7 @@ const (
 	REGISTER TransactionType = iota
 	UPDATE
 	REVOKE
+	RENEW
 )
 
 type Transaction struct {
@@ -54,10 +55,32 @@ func NewTransaction(txType TransactionType, domainName, ip string, cacheTTL int6
 		// currentSlot: current slot number (for calculating ExpirySlot)
 		// TODO: It can be made variable, but for now it is fixed.
 		tx.ExpirySlot = currentSlot + (365 * slotsPerDay) // Default 1 year validity 
-		tx.RedeemsTxID = 0 // REGISTER doesn't redeem anything
+		tx.RedeemsTxID = 0 // REGISTER doesn't redeem anythin
+	g
 	}
 
 	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewRenewTransaction creates a RENEW transaction for an existing domain.
+func NewRenewTransaction(domainName, ip string, cacheTTL int64,
+	oldExpirySlot int64, slotsPerDay int64, redeemsTxID int,
+	ownerKey []byte, registryPrivKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        RENEW,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		IP:          ip,
+		CacheTTL:    cacheTTL,
+		ExpirySlot:  oldExpirySlot + (365 * slotsPerDay), // Extend from old expiry, not current slot
+		RedeemsTxID: redeemsTxID,
+		OwnerKey:    ownerKey,
+		Signature:   nil,
+	}
+	tx.Signature = SignTransaction(registryPrivKey, &tx)
 	return &tx
 }
 
@@ -113,7 +136,7 @@ func VerifySignature(publicKeyBytes []byte, tx *Transaction) bool {
 }
 
 // VerifyTransaction validates a transaction based on its type
-func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64) bool {
+func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64, slotsPerDay int64) bool {
 	switch tx.Type {
 	case REGISTER:
 		if !IsRegistryKey(tx.OwnerKey) {
@@ -128,27 +151,45 @@ func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64
 	case REVOKE:
 		// System transaction (auto-revocation) have no signature and are validated by expiry check
 		if tx.Signature == nil && tx.OwnerKey == nil {
-			if tx.ExpirySlot <= currentSlot {
+			purgeSlot := ComputePurgeSlot(tx.ExpirySlot, slotsPerDay)
+			if purgeSlot <= currentSlot {
 				return true
 			}
-			log.Println("Invalid auto-revocation: domain not expired")
+			log.Println("Invalid auto-revocation: domain not past purge slot")
 			return false
 		}
 		// Manual revocation
 		return VerifySignature(publicKeyBytes, tx)
+
+	case RENEW:
+		if !VerifyRegistrySignature(tx) {
+			log.Println("RENEW not signed by any trusted registry")
+			return false
+		}
+		return true
 	}
 
 	return false
 }
 
-// ValidateRedemption ensures UPDATE/REVOKE transactions properly redeem a previous transaction
-func ValidateRedemption(tx *Transaction, blockchain *Blockchain) bool {
+// VerifyRegistrySignature checks if any trusted registry signed the transaction
+func VerifyRegistrySignature(tx *Transaction) bool {
+	for _, regKey := range TrustedRegistries {
+		if VerifySignature(regKey, tx) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateRedemption ensures UPDATE/REVOKE/RENEW transactions properly redeem a previous transaction
+func ValidateRedemption(tx *Transaction, blockchain *Blockchain, currentSlot int64, slotsPerDay int64) bool {
 	if tx.Type == REGISTER {
 		return true
 	}
 
 	if tx.RedeemsTxID == 0 {
-		log.Println("UPDATE/REVOKE must redeem a previous transaction")
+		log.Println("UPDATE/REVOKE/RENEW must redeem a previous transaction")
 		return false
 	}
 
@@ -175,6 +216,29 @@ func ValidateRedemption(tx *Transaction, blockchain *Blockchain) bool {
 	if !bytes.Equal(prevTx.OwnerKey, tx.OwnerKey) {
 		log.Println("Owner key mismatch in redemption")
 		return false
+	}
+
+	// Phase-specific validation
+	phase := GetDomainPhase(currentSlot, prevTx.ExpirySlot, slotsPerDay)
+
+	switch tx.Type {
+	case UPDATE:
+		if phase != "active" {
+			log.Println("UPDATE rejected: domain is in", phase, "phase (must be active)")
+			return false
+		}
+
+	case RENEW:
+		if phase == "purged" {
+			log.Println("RENEW rejected: domain is purged (grace period has ended)")
+			return false
+		}
+
+	case REVOKE:
+		if phase == "purged" && tx.Signature != nil {
+			log.Println("Manual REVOKE rejected: domain already purged")
+			return false
+		}
 	}
 
 	return true

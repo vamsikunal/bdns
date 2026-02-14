@@ -13,8 +13,9 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 	slotLeader := n.GetSlotLeader(epoch)
 
 	// Verify received block (pass IndexManager for expiration validation)
+	slotsPerDay := int64(86400) / n.Config.SlotInterval
 	if (block.Index == 0 && !blockchain.ValidateGenesisBlock(block, n.RegistryKeys, slotLeader)) ||
-		(block.Index != 0 && !blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(), slotLeader, n.IndexManager)) {
+		(block.Index != 0 && !blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(), slotLeader, n.IndexManager, slotsPerDay)) {
 		log.Println("Invalid block received at ", n.Address)
 		return
 	}
