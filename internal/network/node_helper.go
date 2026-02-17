@@ -26,19 +26,19 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		tx := &block.Transactions[i]
 		switch tx.Type {
 		case blockchain.REGISTER:
-			n.IndexManager.Add(tx.DomainName, tx, block.Index, i)
+			n.IndexManager.Add(tx.DomainName, tx, block.Index, i, slotsPerDay)
 
 		case blockchain.UPDATE:
 			// Remove old tx from expiry index before updating
 			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
-				n.IndexManager.RemoveFromExpiryIndex(oldTx)
+				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 			}
 			n.IndexManager.Update(tx.DomainName, tx)
 
 		case blockchain.REVOKE:
 			// Remove from expiry index before removing from tree
 			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
-				n.IndexManager.RemoveFromExpiryIndex(oldTx)
+				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 			}
 			n.IndexManager.Remove(tx.DomainName)
 		}

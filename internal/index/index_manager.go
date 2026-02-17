@@ -19,7 +19,8 @@ type IndexManager struct {
 	tree         *AVLTree
 	filter       *BloomFilterManager
 	expiryIndex  map[int64][]*blockchain.Transaction 
-	txLocations  map[string]*TxLocation              
+	purgeIndex   map[int64][]*blockchain.Transaction 
+	txLocations  map[string]*TxLocation
 	currentIndex int64
 }
 
@@ -28,6 +29,7 @@ func NewIndexManager() *IndexManager {
 		tree:         &AVLTree{nil},
 		filter:       InitFilter(),
 		expiryIndex:  make(map[int64][]*blockchain.Transaction),
+		purgeIndex:   make(map[int64][]*blockchain.Transaction),
 		txLocations:  make(map[string]*TxLocation),
 		currentIndex: 0, // Corresponds to genesis block
 	}
@@ -69,7 +71,7 @@ func (im *IndexManager) GetIndexHash() []byte {
 	return hash[:]
 }
 
-func (im *IndexManager) Add(domain string, tx *blockchain.Transaction, blockIndex int64, txIndex int) {
+func (im *IndexManager) Add(domain string, tx *blockchain.Transaction, blockIndex int64, txIndex int, slotsPerDay int64) {
 	im.tree.Add(HashDomain(domain), tx)
 	im.filter.AddToValidList(domain)
 
@@ -82,6 +84,10 @@ func (im *IndexManager) Add(domain string, tx *blockchain.Transaction, blockInde
 	// Add to expiry index if ExpirySlot is set
 	if tx.ExpirySlot > 0 {
 		im.expiryIndex[tx.ExpirySlot] = append(im.expiryIndex[tx.ExpirySlot], tx)
+
+		// Also index by PurgeSlot for auto-revocation
+		purgeSlot := blockchain.ComputePurgeSlot(tx.ExpirySlot, slotsPerDay)
+		im.purgeIndex[purgeSlot] = append(im.purgeIndex[purgeSlot], tx)
 	}
 }
 
@@ -105,13 +111,28 @@ func (im *IndexManager) GetExpiredDomains(currentSlot int64) []*blockchain.Trans
 	return im.expiryIndex[currentSlot]
 }
 
-// RemoveFromExpiryIndex removes a domain from the expiry index (when manually revoked early)
-func (im *IndexManager) RemoveFromExpiryIndex(tx *blockchain.Transaction) {
+// GetPurgeableDomains returns domains that should be auto-revoked at the given slot
+func (im *IndexManager) GetPurgeableDomains(currentSlot int64) []*blockchain.Transaction {
+	return im.purgeIndex[currentSlot]
+}
+
+// RemoveFromExpiryIndex removes a domain from the expiry and purge indices (when manually revoked or renewed)
+func (im *IndexManager) RemoveFromExpiryIndex(tx *blockchain.Transaction, slotsPerDay int64) {
 	if tx.ExpirySlot > 0 {
+		
 		expiring := im.expiryIndex[tx.ExpirySlot]
 		for i, t := range expiring {
 			if t.TID == tx.TID {
 				im.expiryIndex[tx.ExpirySlot] = append(expiring[:i], expiring[i+1:]...)
+				break
+			}
+		}
+
+		purgeSlot := blockchain.ComputePurgeSlot(tx.ExpirySlot, slotsPerDay)
+		purging := im.purgeIndex[purgeSlot]
+		for i, t := range purging {
+			if t.TID == tx.TID {
+				im.purgeIndex[purgeSlot] = append(purging[:i], purging[i+1:]...)
 				break
 			}
 		}
@@ -121,4 +142,13 @@ func (im *IndexManager) RemoveFromExpiryIndex(tx *blockchain.Transaction) {
 func HashDomain(domain string) string {
 	hash := sha256.Sum256([]byte(domain))
 	return hex.EncodeToString(hash[:])
+}
+
+// AddToExpiryAndPurgeIndex re-adds a renewed domain to expiry and purge indices
+func (im *IndexManager) AddToExpiryAndPurgeIndex(tx *blockchain.Transaction, slotsPerDay int64) {
+	if tx.ExpirySlot > 0 {
+		im.expiryIndex[tx.ExpirySlot] = append(im.expiryIndex[tx.ExpirySlot], tx)
+		purgeSlot := blockchain.ComputePurgeSlot(tx.ExpirySlot, slotsPerDay)
+		im.purgeIndex[purgeSlot] = append(im.purgeIndex[purgeSlot], tx)
+	}
 }
