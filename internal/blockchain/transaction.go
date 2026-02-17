@@ -54,9 +54,8 @@ func NewTransaction(txType TransactionType, domainName, ip string, cacheTTL int6
 	if txType == REGISTER {
 		// currentSlot: current slot number (for calculating ExpirySlot)
 		// TODO: It can be made variable, but for now it is fixed.
-		tx.ExpirySlot = currentSlot + (365 * slotsPerDay) // Default 1 year validity 
-		tx.RedeemsTxID = 0 // REGISTER doesn't redeem anythin
-	g
+		tx.ExpirySlot = currentSlot + (365 * slotsPerDay) // Default 1 year validity
+		tx.RedeemsTxID = 0                                // REGISTER doesn't redeem anything
 	}
 
 	tx.Signature = SignTransaction(privateKey, &tx)

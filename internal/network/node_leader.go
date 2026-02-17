@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -85,7 +86,7 @@ func (n *Node) CreateBlockIfLeader() {
 		transactions := n.ChooseTxFromPool(blockTxLimit)
 
 		// Add auto-revocation transactions for expired domains
-		autoRevocations := n.GenerateAutoRevocations(slot)
+		autoRevocations := n.GenerateAutoRevocations(slot, transactions)
 		transactions = append(transactions, autoRevocations...)
 
 		if len(transactions) == 0 {
@@ -101,21 +102,32 @@ func (n *Node) CreateBlockIfLeader() {
 
 		// Apply transactions to index BEFORE creating block (for IndexHash)
 		n.TxMutex.Lock()
+		slotsPerDay := int64(86400) / n.Config.SlotInterval
 		for i := range transactions {
 			tx := &transactions[i]
 			switch tx.Type {
+
 			case blockchain.REGISTER:
-				n.IndexManager.Add(tx.DomainName, tx, latestBlock.Index+1, i)
+				n.IndexManager.Add(tx.DomainName, tx, latestBlock.Index+1, i, slotsPerDay)
+
 			case blockchain.UPDATE:
 				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
-					n.IndexManager.RemoveFromExpiryIndex(oldTx)
+					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 				}
 				n.IndexManager.Update(tx.DomainName, tx)
+
 			case blockchain.REVOKE:
 				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
-					n.IndexManager.RemoveFromExpiryIndex(oldTx)
+					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 				}
 				n.IndexManager.Remove(tx.DomainName)
+
+			case blockchain.RENEW:
+				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
+				}
+				n.IndexManager.Update(tx.DomainName, tx)
+				n.IndexManager.AddToExpiryAndPurgeIndex(tx, slotsPerDay)
 			}
 		}
 		n.TxMutex.Unlock()
@@ -133,6 +145,7 @@ func (n *Node) CreateBlockIfLeader() {
 		// Mark spent TxIDs (inside same lock for atomicity)
 		for _, tx := range transactions {
 			if tx.Type == blockchain.UPDATE ||
+				tx.Type == blockchain.RENEW ||
 				(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
 				n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
 			}
@@ -145,31 +158,53 @@ func (n *Node) CreateBlockIfLeader() {
 	}
 }
 
-// GenerateAutoRevocations creates REVOKE transactions for expired domains
-func (n *Node) GenerateAutoRevocations(currentSlot int64) []blockchain.Transaction {
-	expiredDomains := n.IndexManager.GetExpiredDomains(currentSlot)
-	if len(expiredDomains) == 0 {
+// GenerateAutoRevocations creates REVOKE transactions now for domains past their purge slot
+func (n *Node) GenerateAutoRevocations(currentSlot int64, pendingTxs []blockchain.Transaction) []blockchain.Transaction {
+	purgeableDomains := n.IndexManager.GetPurgeableDomains(currentSlot)
+	if len(purgeableDomains) == 0 {
+		return nil
+	}
+
+	// Build a set of domains being renewed in this block's pending transactions.
+	renewedDomains := make(map[string]bool)
+	for _, tx := range pendingTxs {
+		if tx.Type == blockchain.RENEW {
+			renewedDomains[tx.DomainName] = true
+		}
+	}
+
+	// Filter out renewed domains BEFORE sorting — no point sorting entries we'll discard
+	filtered := make([]*blockchain.Transaction, 0, len(purgeableDomains))
+	for _, tx := range purgeableDomains {
+		if renewedDomains[tx.DomainName] {
+			log.Println("Skipping auto-revoke for", tx.DomainName, "— pending RENEW in pool")
+			continue
+		}
+		filtered = append(filtered, tx)
+	}
+
+	if len(filtered) == 0 {
 		return nil
 	}
 
 	// Sort alphabetically by domain name for deterministic ordering
-	sort.Slice(expiredDomains, func(i, j int) bool {
-		return expiredDomains[i].DomainName < expiredDomains[j].DomainName
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].DomainName < filtered[j].DomainName
 	})
 
-	revocations := make([]blockchain.Transaction, 0, len(expiredDomains))
-	for _, tx := range expiredDomains {
+	revocations := make([]blockchain.Transaction, 0, len(filtered))
+	for _, tx := range filtered {
 		revokeTx := blockchain.Transaction{
-			TID:         tx.TID, 
+			TID:         tx.TID,
 			Type:        blockchain.REVOKE,
 			Timestamp:   0,
 			DomainName:  tx.DomainName,
 			IP:          "",
 			CacheTTL:    0,
 			ExpirySlot:  tx.ExpirySlot,
-			RedeemsTxID: tx.TID, // Redeems the original registration
-			OwnerKey:    nil,    // No owner key - system transaction
-			Signature:   nil,    // No signature - validated by expiry check
+			RedeemsTxID: tx.TID,
+			OwnerKey:    nil,  
+			Signature:   nil,  
 		}
 		revocations = append(revocations, revokeTx)
 	}
