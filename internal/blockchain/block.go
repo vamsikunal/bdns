@@ -316,15 +316,26 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 		return false
 	}
 
-	// Validate all required expirations are present in the block
+	// Validate all required purge-slot revocations are present in the block
 	if expiryChecker != nil {
-		expectedExpirations := expiryChecker.GetExpiredDomains(newBlock.SlotNumber)
-		for _, expected := range expectedExpirations {
+		expectedPurges := expiryChecker.GetPurgeableDomains(newBlock.SlotNumber)
+
+		// Build set of domains renewed in this block
+		renewedInBlock := make(map[string]bool)
+		for _, tx := range newBlock.Transactions {
+			if tx.Type == RENEW {
+				renewedInBlock[tx.DomainName] = true
+			}
+		}
+
+		for _, expected := range expectedPurges {
+			// Skip domains that were renewed
+			if renewedInBlock[expected.DomainName] {
+				continue
+			}
+
 			found := false
 			for _, tx := range newBlock.Transactions {
-
-				// Strict validation: check BOTH DomainName AND RedeemsTxID
-				
 				if tx.Type == REVOKE &&
 					tx.DomainName == expected.DomainName &&
 					tx.RedeemsTxID == expected.TID {
@@ -333,7 +344,7 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 				}
 			}
 			if !found {
-				log.Println("Block missing required expiration:", expected.DomainName, "TID:", expected.TID)
+				log.Println("Block missing required purge:", expected.DomainName, "TID:", expected.TID)
 				return false
 			}
 		}
