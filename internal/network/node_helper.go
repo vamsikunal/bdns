@@ -41,6 +41,14 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 			}
 			n.IndexManager.Remove(tx.DomainName)
+
+		case blockchain.RENEW:
+			// Remove old expiry/purge entries, re-add with new ExpirySlot
+			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
+			}
+			n.IndexManager.Update(tx.DomainName, tx)
+			n.IndexManager.AddToExpiryAndPurgeIndex(tx, slotsPerDay)
 		}
 	}
 	blockchain.RemoveTxsFromPool(block.Transactions, n.TransactionPool)
@@ -64,6 +72,7 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 	// Mark spent TxIDs
 	for _, tx := range block.Transactions {
 		if tx.Type == blockchain.UPDATE ||
+			tx.Type == blockchain.RENEW ||
 			(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
 			n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
 		}
