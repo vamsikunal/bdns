@@ -204,6 +204,16 @@ func (n *Node) HandleDNSQuery(sender string, query DNSQueryMsg) {
 		return
 	}
 
+	// only serve proofs for active domains
+	slotsPerDay := int64(86400) / n.Config.SlotInterval
+	currentSlot := (time.Now().Unix() - n.Config.InitialTimestamp) / n.Config.SlotInterval
+	phase := blockchain.GetDomainPhase(currentSlot, tx.ExpirySlot, slotsPerDay)
+	if phase != "active" {
+		n.TxMutex.Unlock()
+		log.Printf("[DNS_QUERY] Domain %s is in %s phase, not serving proof\n", query.DomainName, phase)
+		return
+	}
+
 	loc := n.IndexManager.GetTxLocation(query.DomainName)
 	n.TxMutex.Unlock()
 
