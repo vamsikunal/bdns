@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 )
 
 // StartDNSServer initializes and starts a UDP-based DNS server
@@ -34,7 +35,11 @@ func StartDNSServer(port string, node *Node) {
 		query := string(buffer[:n])
 		log.Printf("Received query: %s", query)
 
-		response, err := ResolveDomain(query, node)
+
+		currentSlot := (time.Now().Unix() - node.Config.InitialTimestamp) / node.Config.SlotInterval
+		slotsPerDay := int64(86400) / node.Config.SlotInterval
+
+		response, err := ResolveDomain(query, node, currentSlot, slotsPerDay)
 		if err != nil {
 			log.Printf("Resolution error: %v", err)
 			response = "ERROR: Domain not found"

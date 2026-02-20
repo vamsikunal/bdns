@@ -262,6 +262,14 @@ func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *met
 		metrics.AddFullNodeDirectResolution(time.Since(start))
 	}
 	if tx != nil {
+		// Only resolve domains in the "active" phase
+		slotsPerDay := int64(86400) / n.Config.SlotInterval
+		currentSlot := (time.Now().Unix() - n.Config.InitialTimestamp) / n.Config.SlotInterval
+		phase := blockchain.GetDomainPhase(currentSlot, tx.ExpirySlot, slotsPerDay)
+		if phase != "active" {
+			fmt.Printf("[DNS] Domain %s is in %s phase, not resolving\n", req.DomainName, phase)
+			return
+		}
 		res := BDNSResponse{
 			Timestamp:  tx.Timestamp,
 			DomainName: tx.DomainName,
