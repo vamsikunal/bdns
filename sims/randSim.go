@@ -51,7 +51,8 @@ func CleanChainData() error {
 }
 
 func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, interval time.Duration,
-	slotInterval int, slotsPerEpoch int, seed int, txProbability float64, queryProbability float64) {
+	slotInterval int, slotsPerEpoch int, seed int, txProbability float64, queryProbability float64,
+	renewProbability float64) {
 	var wg sync.WaitGroup
 
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
@@ -85,6 +86,36 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					fmt.Printf("Node %d sent transaction for domain %s\n", id+1, domain)
 					domains = append(domains, domain) // assuming for simplicity, the tx was accepted
 					atomic.AddInt64(&totalTxns, 1)
+				}
+
+				// Chance to renew a previously registered domain
+				if len(domains) > 0 && rand.Float64() < renewProbability {
+					target := rand.Intn(len(domains))
+					domain := domains[target]
+
+					// Look up the current registration to get TID, ExpirySlot, OwnerKey
+					oldTx := node.IndexManager.GetIP(domain)
+					if oldTx != nil {
+						slotsPerDay := int64(86400 / slotInterval)
+						ownerKeyCopy := make([]byte, len(oldTx.OwnerKey))
+						copy(ownerKeyCopy, oldTx.OwnerKey)
+
+						tx := blockchain.NewRenewTransaction(
+							domain,
+							oldTx.IP,
+							oldTx.CacheTTL,
+							oldTx.ExpirySlot,
+							slotsPerDay,
+							oldTx.TID,
+							ownerKeyCopy,
+							&node.KeyPair.PrivateKey,
+							node.TransactionPool,
+						)
+						node.BroadcastTransaction(*tx)
+						fmt.Printf("Node %d renewed domain %s (old expiry: %d, new expiry: %d)\n",
+							id+1, domain, oldTx.ExpirySlot, tx.ExpirySlot)
+						atomic.AddInt64(&totalTxns, 1)
+					}
 				}
 
 				// Chance to send a DNS request

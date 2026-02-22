@@ -10,16 +10,17 @@ import (
 
 // TestCase defines the parameters for a network simulation
 type TestCase struct {
-	Name             string
-	NumNodes         int
-	TransactionTime  time.Duration
-	SimulationTime   time.Duration
-	Interval         time.Duration
-	SlotInterval     int
-	SlotsPerEpoch    int
-	Seed             int
-	TxProbability    float64
-	QueryProbability float64
+	Name              string
+	NumNodes          int
+	TransactionTime   time.Duration
+	SimulationTime    time.Duration
+	Interval          time.Duration
+	SlotInterval      int
+	SlotsPerEpoch     int
+	Seed              int
+	TxProbability     float64
+	QueryProbability  float64
+	RenewProbability  float64
 }
 
 var testCases = []TestCase{
@@ -36,16 +37,17 @@ var testCases = []TestCase{
 	// 	QueryProbability: 0.3,
 	// },
 	{
-		Name:             "Medium Network",
-		NumNodes:         25,
-		TransactionTime:  20 * time.Second,
-		SimulationTime:   120 * time.Second,
-		Interval:         500 * time.Millisecond,
-		SlotInterval:     5,
-		SlotsPerEpoch:    2,
-		Seed:             0,
-		TxProbability:    0.2,
-		QueryProbability: 0.3,
+		Name:              "Medium Network",
+		NumNodes:          25,
+		TransactionTime:   20 * time.Second,
+		SimulationTime:    120 * time.Second,
+		Interval:          500 * time.Millisecond,
+		SlotInterval:      5,
+		SlotsPerEpoch:     2,
+		Seed:              0,
+		TxProbability:     0.2,
+		QueryProbability:  0.3,
+		RenewProbability:  0.02,
 	},
 	// {
 	// 	Name:             "Large Network",
@@ -81,6 +83,7 @@ func TestNetworks(t *testing.T) {
 				tc.Seed,
 				tc.TxProbability,
 				tc.QueryProbability,
+				tc.RenewProbability,
 			)
 
 			// Add a delay between test cases to ensure clean separation
