@@ -61,7 +61,10 @@ func (tx *Transaction) PrintTx() {
 	fmt.Printf("Type: %d\n", tx.Type)
 	fmt.Printf("Timestamp: %d\n", tx.Timestamp)
 	fmt.Printf("DomainName: %s\n", tx.DomainName)
-	fmt.Printf("IP: %s\n", tx.IP)
+	fmt.Printf("Records:\n")
+	for _, r := range tx.Records {
+		fmt.Printf("  [%s] %s (priority %d)\n", r.Type, r.Value, r.Priority)
+	}
 	fmt.Printf("CacheTTL: %d\n", tx.CacheTTL)
 	fmt.Printf("ExpirySlot: %d\n", tx.ExpirySlot)
 	fmt.Printf("RedeemsTxID: %d\n", tx.RedeemsTxID)
