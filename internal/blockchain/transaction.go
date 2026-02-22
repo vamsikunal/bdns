@@ -9,6 +9,7 @@ import (
 	"encoding/gob"
 	"log"
 	"math/big"
+	"sort"
 	"time"
 )
 
@@ -21,29 +22,52 @@ const (
 	RENEW
 )
 
+// Record represents a single DNS record entry.
+type Record struct {
+	Type     string 
+	Value    string 
+	Priority int    // Only meaningful for MX records; 0 for all other types
+}
+
+// SortRecords sorts a []Record slice in-place using the canonical sorting contract 
+// for deterministic byte representations across all nodes:
+func SortRecords(records []Record) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Type != records[j].Type {
+			return records[i].Type < records[j].Type
+		}
+		if records[i].Priority != records[j].Priority {
+			return records[i].Priority < records[j].Priority
+		}
+		return records[i].Value < records[j].Value
+	})
+}
+
 type Transaction struct {
 	TID         int
 	Type        TransactionType
 	Timestamp   int64
 	DomainName  string
-	IP          string
-	CacheTTL    int64  // How long resolvers should cache (seconds)
-	ExpirySlot  int64  // Slot number when domain registration expires
-	RedeemsTxID int    // For UPDATE/REVOKE - references previous tx (0 for REGISTER)
+	Records     []Record // DNS records; sorted by (Type, Priority, Value) before signing/hashing
+	CacheTTL    int64    // How long resolvers should cache (seconds)
+	ExpirySlot  int64    // Slot number when domain registration expires
+	RedeemsTxID int      // For UPDATE/REVOKE/RENEW - references previous tx (0 for REGISTER)
 	OwnerKey    []byte
 	Signature   []byte
 }
 
-func NewTransaction(txType TransactionType, domainName, ip string, cacheTTL int64,
+func NewTransaction(txType TransactionType, domainName string, records []Record, cacheTTL int64,
 	currentSlot int64, slotsPerDay int64, redeemsTxID int,
 	ownerKey []byte, privateKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
-	
+
+	SortRecords(records)
+
 	tx := Transaction{
 		TID:         GenerateRandomTxID(txPool),
 		Type:        txType,
 		Timestamp:   time.Now().Unix(),
 		DomainName:  domainName,
-		IP:          ip,
+		Records:     records,
 		CacheTTL:    cacheTTL,
 		RedeemsTxID: redeemsTxID, // transaction ID being redeemed (0 for REGISTER, required for UPDATE/REVOKE)
 		OwnerKey:    ownerKey,
@@ -63,20 +87,23 @@ func NewTransaction(txType TransactionType, domainName, ip string, cacheTTL int6
 }
 
 // NewRenewTransaction creates a RENEW transaction for an existing domain.
-func NewRenewTransaction(domainName, ip string, cacheTTL int64,
+func NewRenewTransaction(domainName string, records []Record, cacheTTL int64,
 	oldExpirySlot int64, slotsPerDay int64, redeemsTxID int,
 	ownerKey []byte, registryPrivKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
+
+	// Enforce the sorting contract — a renewal must preserve canonical record order.
+	SortRecords(records)
 
 	tx := Transaction{
 		TID:         GenerateRandomTxID(txPool),
 		Type:        RENEW,
 		Timestamp:   time.Now().Unix(),
 		DomainName:  domainName,
-		IP:          ip,
+		Records:     records,
 		CacheTTL:    cacheTTL,
 		ExpirySlot:  oldExpirySlot + (365 * slotsPerDay), // Extend from old expiry, not current slot
 		RedeemsTxID: redeemsTxID,
-		OwnerKey:    ownerKey,
+		OwnerKey:    ownerKey, // Domain owner's key, NOT the registry's
 		Signature:   nil,
 	}
 	tx.Signature = SignTransaction(registryPrivKey, &tx)
@@ -247,7 +274,19 @@ func (tx *Transaction) SerializeForSigning() []byte {
 	txData := append(IntToByteArr(int64(tx.TID)), byte(tx.Type))
 	txData = append(txData, IntToByteArr(tx.Timestamp)...)
 	txData = append(txData, []byte(tx.DomainName)...)
-	txData = append(txData, []byte(tx.IP)...)
+
+	// Sort a copy of the records so we never mutate the original transaction
+	records := make([]Record, len(tx.Records))
+	copy(records, tx.Records)
+	SortRecords(records)
+
+	// Serialize each record in canonical order: Type, Value, Priority.
+	for _, r := range records {
+		txData = append(txData, []byte(r.Type)...)
+		txData = append(txData, []byte(r.Value)...)
+		txData = append(txData, IntToByteArr(int64(r.Priority))...)
+	}
+
 	txData = append(txData, IntToByteArr(tx.CacheTTL)...)
 	txData = append(txData, IntToByteArr(tx.ExpirySlot)...)
 	txData = append(txData, IntToByteArr(int64(tx.RedeemsTxID))...)
