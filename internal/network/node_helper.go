@@ -30,21 +30,21 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 
 		case blockchain.UPDATE:
 			// Remove old tx from expiry index before updating
-			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+			if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
 				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 			}
 			n.IndexManager.Update(tx.DomainName, tx)
 
 		case blockchain.REVOKE:
 			// Remove from expiry index before removing from tree
-			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+			if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
 				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 			}
 			n.IndexManager.Remove(tx.DomainName)
 
 		case blockchain.RENEW:
 			// Remove old expiry/purge entries, re-add with new ExpirySlot
-			if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+			if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
 				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 			}
 			n.IndexManager.Update(tx.DomainName, tx)
@@ -184,7 +184,7 @@ type DNSQueryMsg struct {
 // DNSProofResponse contains the answer + cryptographic proof for light node verification
 type DNSProofResponse struct {
 	DomainName  string
-	IP          string
+	Records     []blockchain.Record
 	Transaction blockchain.Transaction
 	Proof       blockchain.MerkleProof
 	BlockHeader blockchain.BlockHeader
@@ -197,7 +197,7 @@ func (n *Node) HandleDNSQuery(sender string, query DNSQueryMsg) {
 	}
 
 	n.TxMutex.Lock()
-	tx := n.IndexManager.GetIP(query.DomainName)
+	tx := n.IndexManager.GetDomain(query.DomainName)
 	if tx == nil {
 		n.TxMutex.Unlock()
 		log.Println("[DNS_QUERY] Domain not found:", query.DomainName)
@@ -236,7 +236,7 @@ func (n *Node) HandleDNSQuery(sender string, query DNSQueryMsg) {
 
 	response := DNSProofResponse{
 		DomainName:  query.DomainName,
-		IP:          tx.IP,
+		Records:     tx.Records,
 		Transaction: *tx,
 		Proof:       *proof,
 		BlockHeader: block.Header(),
@@ -251,7 +251,7 @@ func (n *Node) HandleDNSProof(response DNSProofResponse) {
 		return
 	}
 
-	// Optimistic waiting: header might arrive slightly after proof 
+	// Optimistic waiting: header might arrive slightly after proof
 	header := n.waitForHeader(response.BlockHeader.Index, 2*time.Second)
 	if header == nil {
 		log.Println("[DNS_PROOF] Header not received after timeout, block:", response.BlockHeader.Index)
@@ -270,10 +270,21 @@ func (n *Node) HandleDNSProof(response DNSProofResponse) {
 		return
 	}
 
-	// Verified! Cache the result
+	// Verified! Cache the first A record (or empty if none)
+	firstA := ""
+	for _, r := range response.Records {
+		if r.Type == "A" {
+			firstA = r.Value
+			break
+		}
+	}
 	log.Printf("[DNS_PROOF] Verified: %s → %s (block #%d)\n",
-		response.DomainName, response.IP, response.BlockHeader.Index)
-	SetToCache(response.DomainName, response.IP)
+		response.DomainName, firstA, response.BlockHeader.Index)
+	// Cache any A records from the proof under queryType "A"
+	aRecords := filterByType(response.Records, "A")
+	if len(aRecords) > 0 {
+		SetToCache(response.DomainName, "A", aRecords)
+	}
 }
 
 // waitForHeader polls for a block header with a timeout (handles network lag)

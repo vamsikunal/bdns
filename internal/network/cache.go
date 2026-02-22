@@ -3,39 +3,47 @@ package network
 import (
 	"sync"
 	"time"
+
+	"github.com/bleasey/bdns/internal/blockchain"
 )
 
+// An "A" and "MX" query for the same domain are different cache entries.
+type cacheKey struct {
+	Domain    string
+	QueryType string
+}
+
+type cacheEntry struct {
+	records []blockchain.Record
+	expiry  time.Time
+}
+
 var (
-	cache      = make(map[string]cacheEntry)
+	cache      = make(map[cacheKey]cacheEntry)
 	cacheMutex sync.Mutex
 )
 
-// cacheEntry holds DNS records with TTL
-type cacheEntry struct {
-	ip     string
-	expiry time.Time
-}
-
-// Get retrieves a domain from the cache
-func GetFromCache(domain string) (string, bool) {
+// GetFromCache retrieves cached records for a (domain, queryType) pair.
+func GetFromCache(domain, queryType string) ([]blockchain.Record, bool) {
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
 
-	entry, found := cache[domain]
+	key := cacheKey{Domain: domain, QueryType: queryType}
+	entry, found := cache[key]
 	if !found || time.Now().After(entry.expiry) {
-		delete(cache, domain) // Clean up expired entries
-		return "", false
+		delete(cache, key)
+		return nil, false
 	}
-	return entry.ip, true
+	return entry.records, true
 }
 
-// Set stores a domain in the cache with a default TTL of 300 seconds
-func SetToCache(domain, ip string) {
+// SetToCache stores records for a (domain, queryType) pair with a 300-second TTL.
+func SetToCache(domain, queryType string, records []blockchain.Record) {
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
 
-	cache[domain] = cacheEntry{
-		ip:     ip,
-		expiry: time.Now().Add(300 * time.Second), // 5-minute TTL
+	cache[cacheKey{Domain: domain, QueryType: queryType}] = cacheEntry{
+		records: records,
+		expiry:  time.Now().Add(300 * time.Second),
 	}
 }
