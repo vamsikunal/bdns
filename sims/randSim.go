@@ -61,7 +61,11 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	time.Sleep(time.Duration(slotInterval) * time.Second)
 
 	LatencyTimes := make([]time.Duration, 0)
+	var latencyMu sync.Mutex
+
 	domains := make([]string, 0) // list of registered domains
+	var domainsMu sync.Mutex     // guards domains
+
 	txOnlyTime := time.Now().Add(txTime)
 	simStopTime := time.Now().Add(simulationTime)
 	var totalQueries int64
@@ -78,21 +82,34 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 			for time.Now().Before(simStopTime) {
 				// Chance to create transaction
 				if rand.Float64() < txProbability {
+					domainsMu.Lock()
 					domain := fmt.Sprintf("tx%d-node%d.com", len(domains), id+1)
+					domainsMu.Unlock()
+
 					ip := fmt.Sprintf("10.0.%d.%d", id+1, rand.Intn(255))
 					ttl := int64(3600)
 					records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
 					tx := blockchain.NewTransaction(blockchain.REGISTER, domain, records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
 					node.BroadcastTransaction(*tx)
 					fmt.Printf("Node %d sent transaction for domain %s\n", id+1, domain)
-					domains = append(domains, domain) // assuming for simplicity, the tx was accepted
+
+					domainsMu.Lock()
+					domains = append(domains, domain)
+					domainsMu.Unlock()
+
 					atomic.AddInt64(&totalTxns, 1)
 				}
 
 				// Chance to renew a previously registered domain
-				if len(domains) > 0 && rand.Float64() < renewProbability {
+				domainsMu.Lock()
+				nDomains := len(domains)
+				domainsMu.Unlock()
+
+				if nDomains > 0 && rand.Float64() < renewProbability {
+					domainsMu.Lock()
 					target := rand.Intn(len(domains))
 					domain := domains[target]
+					domainsMu.Unlock()
 
 					// Look up the current registration to get TID, ExpirySlot, OwnerKey
 					oldTx := node.IndexManager.GetDomain(domain)
@@ -124,13 +141,24 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 				}
 
 				// Chance to send a DNS request
-				if time.Now().After(txOnlyTime) && rand.Float64() < queryProbability {
+				domainsMu.Lock()
+				nDomainsQ := len(domains)
+				domainsMu.Unlock()
+
+				if time.Now().After(txOnlyTime) && nDomainsQ > 0 && rand.Float64() < queryProbability {
+					domainsMu.Lock()
 					target := rand.Intn(len(domains))
 					domain := domains[target]
+					domainsMu.Unlock()
+
 					startTime := time.Now()
 					node.MakeDNSRequest(domain, metrics)
 					endTime := time.Now()
+
+					latencyMu.Lock()
 					LatencyTimes = append(LatencyTimes, endTime.Sub(startTime))
+					latencyMu.Unlock()
+
 					atomic.AddInt64(&totalQueries, 1)
 				}
 

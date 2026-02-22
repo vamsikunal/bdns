@@ -355,6 +355,14 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 
 func (b *Block) ValidateTransactions(slotsPerDay int64) bool {
 	for _, tx := range b.Transactions {
+		switch tx.Type {
+		case REGISTER, UPDATE, RENEW:
+			if len(tx.Records) == 0 {
+				log.Printf("ValidateTransactions: %d transaction has no records (domain: %s)", tx.Type, tx.DomainName)
+				return false
+			}
+		}
+
 		if !VerifyTransaction(tx.OwnerKey, &tx, b.SlotNumber, slotsPerDay) {
 			return false
 		}
