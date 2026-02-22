@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/bleasey/bdns/internal/blockchain"
 )
@@ -64,8 +65,13 @@ func (im *IndexManager) GetIndexHash() []byte {
 
 	var data []byte
 	for _, r := range records {
-		// Include ExpirySlot so RENEW-induced changes are reflected in the hash.
-		line := fmt.Sprintf("%s:%s:%d\n", r.Domain, r.IP, r.ExpirySlot)
+		
+		var parts []string
+		for _, rec := range r.Records {
+			parts = append(parts, fmt.Sprintf("%s:%s:%d", rec.Type, rec.Value, rec.Priority))
+		}
+		recStr := "[" + strings.Join(parts, "|") + "]"
+		line := fmt.Sprintf("%s:%d:%s\n", r.Domain, r.ExpirySlot, recStr)
 		data = append(data, []byte(line)...)
 	}
 

@@ -197,11 +197,11 @@ func (n *AVLNode) findSmallest() *AVLNode {
 // 	return hash[:]
 // }
 
-// DomainRecord represents a domain-IP pair for deterministic hashing
+// DomainRecord represents a domain and its DNS records for deterministic hashing
 type DomainRecord struct {
 	Domain     string
-	IP         string
-	ExpirySlot int64 
+	Records    []blockchain.Record
+	ExpirySlot int64
 }
 
 // GetAllRecords performs in-order traversal to extract all active domain records
@@ -218,7 +218,7 @@ func (n *AVLNode) inOrderTraversal(records *[]DomainRecord) {
 	n.left.inOrderTraversal(records)
 	*records = append(*records, DomainRecord{
 		Domain:     n.value.DomainName,
-		IP:         n.value.IP,
+		Records:    n.value.Records,
 		ExpirySlot: n.value.ExpirySlot,
 	})
 	n.right.inOrderTraversal(records)
