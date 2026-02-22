@@ -1,7 +1,7 @@
 package network
 
 import (
-	//"encoding/hex"
+	//\"encoding/hex\"
 	"fmt"
 	"log"
 	"net"
@@ -35,17 +35,19 @@ func StartDNSServer(port string, node *Node) {
 		query := string(buffer[:n])
 		log.Printf("Received query: %s", query)
 
-
 		currentSlot := (time.Now().Unix() - node.Config.InitialTimestamp) / node.Config.SlotInterval
 		slotsPerDay := int64(86400) / node.Config.SlotInterval
 
-		response, err := ResolveDomain(query, node, currentSlot, slotsPerDay)
-		if err != nil {
+		records, err := ResolveDomain(query, "A", node, currentSlot, slotsPerDay)
+		var responseStr string
+		if err != nil || len(records) == 0 {
 			log.Printf("Resolution error: %v", err)
-			response = "ERROR: Domain not found"
+			responseStr = "ERROR: Domain not found"
+		} else {
+			responseStr = records[0].Value
 		}
 
-		_, err = conn.WriteToUDP([]byte(response), clientAddr)
+		_, err = conn.WriteToUDP([]byte(responseStr), clientAddr)
 		if err != nil {
 			log.Printf("Failed to send response: %v", err)
 		}

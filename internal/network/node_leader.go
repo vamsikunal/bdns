@@ -111,19 +111,19 @@ func (n *Node) CreateBlockIfLeader() {
 				n.IndexManager.Add(tx.DomainName, tx, latestBlock.Index+1, i, slotsPerDay)
 
 			case blockchain.UPDATE:
-				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+				if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
 					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 				}
 				n.IndexManager.Update(tx.DomainName, tx)
 
 			case blockchain.REVOKE:
-				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+				if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
 					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 				}
 				n.IndexManager.Remove(tx.DomainName)
 
 			case blockchain.RENEW:
-				if oldTx := n.IndexManager.GetIP(tx.DomainName); oldTx != nil {
+				if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
 					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
 				}
 				n.IndexManager.Update(tx.DomainName, tx)
@@ -199,12 +199,11 @@ func (n *Node) GenerateAutoRevocations(currentSlot int64, pendingTxs []blockchai
 			Type:        blockchain.REVOKE,
 			Timestamp:   0,
 			DomainName:  tx.DomainName,
-			IP:          "",
 			CacheTTL:    0,
 			ExpirySlot:  tx.ExpirySlot,
 			RedeemsTxID: tx.TID,
-			OwnerKey:    nil,  
-			Signature:   nil,  
+			OwnerKey:    nil, 
+			Signature:   nil,
 		}
 		revocations = append(revocations, revokeTx)
 	}

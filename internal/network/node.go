@@ -211,8 +211,10 @@ func (n *Node) BroadcastTransaction(tx blockchain.Transaction) {
 }
 
 func (n *Node) MakeDNSRequest(domainName string, metrics *metrics.DNSMetrics) {
-	if ip, found := GetFromCache(domainName); found {
-		fmt.Printf("[CACHE HIT] %s -> %s\n", domainName, ip)
+	if records, found := GetFromCache(domainName, "A"); found {
+		if len(records) > 0 {
+			fmt.Printf("[CACHE HIT] %s -> %s\n", domainName, records[0].Value)
+		}
 		return
 	}
 	req := BDNSRequest{DomainName: domainName}
@@ -256,7 +258,7 @@ func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *met
 	// Otherwise, full node will handle it
 	n.TxMutex.Lock()
 	defer n.TxMutex.Unlock()
-	tx := n.IndexManager.GetIP(req.DomainName)
+	tx := n.IndexManager.GetDomain(req.DomainName)
 
 	if metrics != nil {
 		metrics.AddFullNodeDirectResolution(time.Since(start))
@@ -270,10 +272,18 @@ func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *met
 			fmt.Printf("[DNS] Domain %s is in %s phase, not resolving\n", req.DomainName, phase)
 			return
 		}
+		// Full multi-record resolution via DNSProofResponse is handled in HandleDNSQuery.
+		firstA := ""
+		for _, r := range tx.Records {
+			if r.Type == "A" {
+				firstA = r.Value
+				break
+			}
+		}
 		res := BDNSResponse{
 			Timestamp:  tx.Timestamp,
 			DomainName: tx.DomainName,
-			IP:         tx.IP,
+			IP:         firstA,
 			CacheTTL:   tx.CacheTTL,
 			OwnerKey:   tx.OwnerKey,
 			Signature:  tx.Signature,
@@ -284,8 +294,10 @@ func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *met
 }
 
 func (n *Node) DNSResponseHandler(res BDNSResponse) {
-	fmt.Println("DNS Response with Full node received at ", n.Address, " -> ", res.DomainName, " IP:", res.IP)
-	SetToCache(res.DomainName, res.IP)
+	fmt.Println("DNS Response with Full node received at ", n.Address, " ->", res.DomainName, " IP:", res.IP)
+	if res.IP != "" {
+		SetToCache(res.DomainName, "A", []blockchain.Record{{Type: "A", Value: res.IP, Priority: 0}})
+	}
 }
 
 func (n *Node) RandomNumberHandler(epoch int64, sender string, secretValue int, randomValue int) {

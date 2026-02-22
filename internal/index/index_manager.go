@@ -20,8 +20,8 @@ type TxLocation struct {
 type IndexManager struct {
 	tree         *AVLTree
 	filter       *BloomFilterManager
-	expiryIndex  map[int64][]*blockchain.Transaction 
-	purgeIndex   map[int64][]*blockchain.Transaction 
+	expiryIndex  map[int64][]*blockchain.Transaction
+	purgeIndex   map[int64][]*blockchain.Transaction
 	txLocations  map[string]*TxLocation
 	currentIndex int64
 }
@@ -37,8 +37,8 @@ func NewIndexManager() *IndexManager {
 	}
 }
 
-func (im *IndexManager) GetIP(domain string) *blockchain.Transaction {
-	// Check if the domain is valid
+// Check if the domain is valid
+func (im *IndexManager) GetDomain(domain string) *blockchain.Transaction {
 	if !im.filter.IsValid(domain) {
 		return nil
 	}
@@ -58,14 +58,14 @@ func (im *IndexManager) GetIndexHash() []byte {
 		return nil
 	}
 
-	// Sort alphabetically by domain and Serialize 
+	// Sort alphabetically by domain and Serialize
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].Domain < records[j].Domain
 	})
 
 	var data []byte
 	for _, r := range records {
-		
+
 		var parts []string
 		for _, rec := range r.Records {
 			parts = append(parts, fmt.Sprintf("%s:%s:%d", rec.Type, rec.Value, rec.Priority))
@@ -128,7 +128,7 @@ func (im *IndexManager) GetPurgeableDomains(currentSlot int64) []*blockchain.Tra
 // RemoveFromExpiryIndex removes a domain from the expiry and purge indices (when manually revoked or renewed)
 func (im *IndexManager) RemoveFromExpiryIndex(tx *blockchain.Transaction, slotsPerDay int64) {
 	if tx.ExpirySlot > 0 {
-		
+
 		expiring := im.expiryIndex[tx.ExpirySlot]
 		for i, t := range expiring {
 			if t.TID == tx.TID {
