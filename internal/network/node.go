@@ -40,6 +40,7 @@ type Node struct {
 	PeerID          string
 	KnownFullPeers  []string
 	HeaderChain     []blockchain.BlockHeader // Light nodes store only headers
+	cancel          context.CancelFunc       // cancels CreateBlockIfLeader goroutine
 }
 
 // Node Config
