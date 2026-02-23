@@ -98,6 +98,17 @@ func (n *Node) CreateBlockIfLeader() {
 
 		n.BcMutex.Lock()
 		latestBlock := n.Blockchain.GetLatestBlock()
+		
+		if latestBlock.SlotNumber >= slot {
+			n.BcMutex.Unlock()
+			fmt.Printf("[LEADER] Slot %d already committed (latest slot: %d), skipping\n", slot, latestBlock.SlotNumber)
+			n.TxMutex.Lock()
+			for i := range transactions {
+				n.TransactionPool[transactions[i].TID] = &transactions[i]
+			}
+			n.TxMutex.Unlock()
+			continue
+		}
 		n.BcMutex.Unlock()
 
 		// Apply transactions to index BEFORE creating block (for IndexHash)
@@ -202,7 +213,7 @@ func (n *Node) GenerateAutoRevocations(currentSlot int64, pendingTxs []blockchai
 			CacheTTL:    0,
 			ExpirySlot:  tx.ExpirySlot,
 			RedeemsTxID: tx.TID,
-			OwnerKey:    nil, 
+			OwnerKey:    nil,
 			Signature:   nil,
 		}
 		revocations = append(revocations, revokeTx)
