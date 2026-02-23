@@ -54,7 +54,9 @@ func InitializeP2PNodes(numNodes int, slotInterval int, slotsPerEpoch int, seed 
 
 	// Initialize nodes given registryKeys and params
 	for i := 0; i < numNodes; i++ {
-		go nodes[i].InitializeNodeAsync(strconv.Itoa(i), registryKeys, currTimestamp, int64(slotInterval), int64(slotsPerEpoch), float64(seed))
+		ctx, cancel := context.WithCancel(context.Background())
+		nodes[i].cancel = cancel
+		go nodes[i].InitializeNodeAsync(ctx, strconv.Itoa(i), registryKeys, currTimestamp, int64(slotInterval), int64(slotsPerEpoch), float64(seed))
 	}
 
 	time.Sleep(2 * time.Second) // Let the network stabilize
@@ -86,7 +88,7 @@ func InitializeP2PNodes(numNodes int, slotInterval int, slotsPerEpoch int, seed 
 	return nodes
 }
 
-func (n *Node) InitializeNodeAsync(chainID string, registryKeys [][]byte, initialTimestamp int64, slotInterval int64, slotsPerEpoch int64, seed float64) {
+func (n *Node) InitializeNodeAsync(ctx context.Context, chainID string, registryKeys [][]byte, initialTimestamp int64, slotInterval int64, slotsPerEpoch int64, seed float64) {
 	initialWaitTime := int64(5) // wait for initial stability (in secs)
 	n.RegistryKeys = registryKeys
 
@@ -112,12 +114,22 @@ func (n *Node) InitializeNodeAsync(chainID string, registryKeys [][]byte, initia
 		return
 	}
 
-	n.CreateBlockIfLeader()
+	n.CreateBlockIfLeader(ctx)
 }
 
 func NodesCleanup(nodes []*Node) {
 	fmt.Println("- - - - - - - - - - - -")
 	fmt.Println("Cleaning up nodes....")
+
+	// Signal all CreateBlockIfLeader goroutines to stop BEFORE closing the DB.
+	for _, node := range nodes {
+		if node.cancel != nil {
+			node.cancel()
+		}
+	}
+
+	// Give goroutines a moment to observe the cancellation.
+	time.Sleep(time.Duration(nodes[0].Config.SlotInterval+1) * time.Second)
 
 	// Close all databases
 	for _, node := range nodes {

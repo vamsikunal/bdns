@@ -2,6 +2,7 @@ package network
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -35,7 +36,7 @@ func (n *Node) GetSlotLeader(epoch int64) []byte {
 	return slotLeader
 }
 
-func (n *Node) CreateBlockIfLeader() {
+func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(n.Config.SlotInterval) * time.Second)
 	defer ticker.Stop()
 
@@ -64,7 +65,12 @@ func (n *Node) CreateBlockIfLeader() {
 	blockTxLimit := 10
 
 	// Ticker loop for slots
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		slot++
 		newEpoch := slot / n.Config.SlotsPerEpoch
 
@@ -98,7 +104,7 @@ func (n *Node) CreateBlockIfLeader() {
 
 		n.BcMutex.Lock()
 		latestBlock := n.Blockchain.GetLatestBlock()
-		
+
 		if latestBlock.SlotNumber >= slot {
 			n.BcMutex.Unlock()
 			fmt.Printf("[LEADER] Slot %d already committed (latest slot: %d), skipping\n", slot, latestBlock.SlotNumber)
