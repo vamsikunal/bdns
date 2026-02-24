@@ -108,10 +108,14 @@ func resolveCNAME(domain string, queryType string, n *Node, currentSlot int64, s
 		return nil, fmt.Errorf("domain %s is in %s phase (CNAME chain)", domain, phase)
 	}
 
-	// Follow the CNAME to its target
+	// Follow the CNAME to its target, or filter by requested type if no CNAME here.
 	cnameRecords := filterByType(tx.Records, "CNAME")
 	if len(cnameRecords) == 0 {
-		return filterByType(tx.Records, queryType), nil
+		filtered := filterByType(tx.Records, queryType)
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("no %s records for domain %s (CNAME chain)", queryType, domain)
+		}
+		return filtered, nil
 	}
 
 	return resolveCNAME(cnameRecords[0].Value, queryType, n, currentSlot, slotsPerDay, visited)
