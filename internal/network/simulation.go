@@ -131,10 +131,15 @@ func NodesCleanup(nodes []*Node) {
 	// Give goroutines a moment to observe the cancellation.
 	time.Sleep(time.Duration(nodes[0].Config.SlotInterval+1) * time.Second)
 
-	// Close all databases
+	// Close all databases and network resources
 	for _, node := range nodes {
 		if err := node.Blockchain.CloseDB(); err != nil {
 			log.Printf("Failed to close database for node %s: %v", node.Address, err)
+		}
+
+		// Close the DNS server UDP conn
+		if node.dnsConn != nil {
+			node.dnsConn.Close()
 		}
 
 		node.P2PNetwork.Close()
