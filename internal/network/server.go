@@ -18,9 +18,13 @@ func StartDNSServer(port string, node *Node) {
 
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		log.Fatalf("Failed to start UDP server: %v", err)
+		log.Printf("Failed to start UDP server on :%s: %v", port, err)
+		return
 	}
 	defer conn.Close()
+
+	// Store the conn so NodesCleanup can close it
+	node.dnsConn = conn
 
 	//log.Printf("BDNS Server started on port %s...\n", port)
 
@@ -28,8 +32,8 @@ func StartDNSServer(port string, node *Node) {
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
-			log.Printf("Failed to read UDP request: %v", err)
-			continue
+			// conn was closed by NodesCleanup — exit cleanly.
+			return
 		}
 
 		query := string(buffer[:n])

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
@@ -41,6 +42,7 @@ type Node struct {
 	KnownFullPeers  []string
 	HeaderChain     []blockchain.BlockHeader // Light nodes store only headers
 	cancel          context.CancelFunc       // cancels CreateBlockIfLeader goroutine
+	dnsConn         *net.UDPConn             // DNS server listener; closed by NodesCleanup
 }
 
 // Node Config
