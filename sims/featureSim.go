@@ -108,9 +108,10 @@ func FeatureSim() {
 			oldTx.ExpirySlot,
 			slotsPerDay,
 			oldTx.TID,
-			oldTx.OwnerKey,
+			queryNode.KeyPair.PublicKey, 
 			&queryNode.KeyPair.PrivateKey,
 			queryNode.TransactionPool,
+			0, 0,
 		)
 		queryNode.BroadcastTransaction(*tx)
 		fmt.Printf("[RENEW] renew-me.bdns — updated records (old expiry: %d, new expiry: %d)\n",
@@ -202,6 +203,7 @@ func registerDomain(node *network.Node, domain string, records []blockchain.Reco
 		node.KeyPair.PublicKey,
 		&node.KeyPair.PrivateKey,
 		node.TransactionPool,
+		0, 0,
 	)
 	node.BroadcastTransaction(*tx)
 }

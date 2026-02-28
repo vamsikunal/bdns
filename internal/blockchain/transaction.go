@@ -20,6 +20,11 @@ const (
 	UPDATE
 	REVOKE
 	RENEW
+	LIST
+	BUY
+	TRANSFER
+	DELIST
+	FUND
 )
 
 // Record represents a single DNS record entry.
@@ -49,16 +54,21 @@ type Transaction struct {
 	Timestamp   int64
 	DomainName  string
 	Records     []Record // DNS records; sorted by (Type, Priority, Value) before signing/hashing
-	CacheTTL    int64    // How long resolvers should cache (seconds)
+	CacheTTL    int64    // How long resolversto  should cache (seconds)
 	ExpirySlot  int64    // Slot number when domain registration expires
 	RedeemsTxID int      // For UPDATE/REVOKE/RENEW - references previous tx (0 for REGISTER)
 	OwnerKey    []byte
-	Signature   []byte
+	Fee         uint64   // B-Coins paid to the slot leader
+	Nonce       uint64   // Per-account monotonic counter to prevents replay attacks
+	ListPrice   uint64   // Asking price in B-Coins (non-zero only for LIST transactions)
+	Recipient   []byte   // Recipient's public key (non-nil only for TRANSFER/FUND transactions)
+	Signature   []byte   
 }
 
 func NewTransaction(txType TransactionType, domainName string, records []Record, cacheTTL int64,
 	currentSlot int64, slotsPerDay int64, redeemsTxID int,
-	ownerKey []byte, privateKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
+	ownerKey []byte, privateKey *ecdsa.PrivateKey, txPool map[int]*Transaction,
+	fee uint64, nonce uint64) *Transaction {
 
 	SortRecords(records)
 
@@ -71,6 +81,8 @@ func NewTransaction(txType TransactionType, domainName string, records []Record,
 		CacheTTL:    cacheTTL,
 		RedeemsTxID: redeemsTxID, // transaction ID being redeemed (0 for REGISTER, required for UPDATE/REVOKE)
 		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
 		Signature:   nil,
 	}
 
@@ -87,9 +99,11 @@ func NewTransaction(txType TransactionType, domainName string, records []Record,
 }
 
 // NewRenewTransaction creates a RENEW transaction for an existing domain.
+// registryKey is the TrustedRegistry's public key (the signer), NOT the domain owner's key.
 func NewRenewTransaction(domainName string, records []Record, cacheTTL int64,
 	oldExpirySlot int64, slotsPerDay int64, redeemsTxID int,
-	ownerKey []byte, registryPrivKey *ecdsa.PrivateKey, txPool map[int]*Transaction) *Transaction {
+	registryKey []byte, registryPrivKey *ecdsa.PrivateKey, txPool map[int]*Transaction,
+	fee uint64, nonce uint64) *Transaction {
 
 	// Enforce the sorting contract — a renewal must preserve canonical record order.
 	SortRecords(records)
@@ -103,7 +117,9 @@ func NewRenewTransaction(domainName string, records []Record, cacheTTL int64,
 		CacheTTL:    cacheTTL,
 		ExpirySlot:  oldExpirySlot + (365 * slotsPerDay), // Extend from old expiry, not current slot
 		RedeemsTxID: redeemsTxID,
-		OwnerKey:    ownerKey, // Domain owner's key, NOT the registry's
+		OwnerKey:    registryKey, // FIXED: signer's key — fees/nonces charged to registry, not domain owner
+		Fee:         fee,
+		Nonce:       nonce,
 		Signature:   nil,
 	}
 	tx.Signature = SignTransaction(registryPrivKey, &tx)
@@ -291,6 +307,10 @@ func (tx *Transaction) SerializeForSigning() []byte {
 	txData = append(txData, IntToByteArr(tx.ExpirySlot)...)
 	txData = append(txData, IntToByteArr(int64(tx.RedeemsTxID))...)
 	txData = append(txData, tx.OwnerKey...)
+	txData = append(txData, IntToByteArr(int64(tx.Fee))...)
+	txData = append(txData, IntToByteArr(int64(tx.Nonce))...)
+	txData = append(txData, IntToByteArr(int64(tx.ListPrice))...)
+	txData = append(txData, tx.Recipient...)
 
 	return txData
 }

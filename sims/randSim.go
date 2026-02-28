@@ -89,7 +89,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					ip := fmt.Sprintf("10.0.%d.%d", id+1, rand.Intn(255))
 					ttl := int64(3600)
 					records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
-					tx := blockchain.NewTransaction(blockchain.REGISTER, domain, records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
+							tx := blockchain.NewTransaction(blockchain.REGISTER, domain, records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool, 0, 0)
 					node.BroadcastTransaction(*tx)
 					fmt.Printf("Node %d sent transaction for domain %s\n", id+1, domain)
 
@@ -115,8 +115,6 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					oldTx := node.IndexManager.GetDomain(domain)
 					if oldTx != nil {
 						slotsPerDay := int64(86400 / slotInterval)
-						ownerKeyCopy := make([]byte, len(oldTx.OwnerKey))
-						copy(ownerKeyCopy, oldTx.OwnerKey)
 
 						// Copy the existing records to carry them forward on renewal
 						recordsCopy := make([]blockchain.Record, len(oldTx.Records))
@@ -129,9 +127,10 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 							oldTx.ExpirySlot,
 							slotsPerDay,
 							oldTx.TID,
-							ownerKeyCopy,
+							node.KeyPair.PublicKey, // registry key
 							&node.KeyPair.PrivateKey,
 							node.TransactionPool,
+							0, 0,
 						)
 						node.BroadcastTransaction(*tx)
 						fmt.Printf("Node %d renewed domain %s (old expiry: %d, new expiry: %d)\n",
