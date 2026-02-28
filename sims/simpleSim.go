@@ -30,7 +30,7 @@ func SimpleSim() {
 		ip := fmt.Sprintf("192.168.1.%d", i+1)
 		ttl := int64(3600)
 		records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
-		tx := blockchain.NewTransaction(blockchain.REGISTER, domains[i], records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool)
+		tx := blockchain.NewTransaction(blockchain.REGISTER, domains[i], records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool, 0, 0)
 		node.BroadcastTransaction(*tx)
 		fmt.Printf("[REGISTER] node%d → %s → %s\n", i+1, domains[i], ip)
 		time.Sleep(500 * time.Millisecond) // stagger to avoid all txs in same pool slot
