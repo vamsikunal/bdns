@@ -99,7 +99,6 @@ func NewTransaction(txType TransactionType, domainName string, records []Record,
 }
 
 // NewRenewTransaction creates a RENEW transaction for an existing domain.
-// registryKey is the TrustedRegistry's public key (the signer), NOT the domain owner's key.
 func NewRenewTransaction(domainName string, records []Record, cacheTTL int64,
 	oldExpirySlot int64, slotsPerDay int64, redeemsTxID int,
 	registryKey []byte, registryPrivKey *ecdsa.PrivateKey, txPool map[int]*Transaction,
@@ -123,6 +122,115 @@ func NewRenewTransaction(domainName string, records []Record, cacheTTL int64,
 		Signature:   nil,
 	}
 	tx.Signature = SignTransaction(registryPrivKey, &tx)
+	return &tx
+}
+
+// NewListTransaction creates a LIST transaction to put a domain up for sale.
+func NewListTransaction(domainName string, listPrice uint64, redeemsTxID int,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	if listPrice == 0 {
+		log.Printf("NewListTransaction: listPrice must be > 0 (use TRANSFER for free transfers)")
+		return nil
+	}
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        LIST,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		Records:     nil,
+		RedeemsTxID: redeemsTxID,
+		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+		ListPrice:   listPrice,
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewBuyTransaction creates a BUY transaction to purchase a listed domain.
+func NewBuyTransaction(domainName string, maxPrice uint64, redeemsTxID int,
+	buyerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        BUY,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		Records:     nil,
+		RedeemsTxID: redeemsTxID,
+		OwnerKey:    buyerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+		ListPrice:   maxPrice, // buyer's maximum acceptable price.
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewTransferTransaction creates a TRANSFER transaction to change domain ownership.
+func NewTransferTransaction(domainName string, recipient []byte, redeemsTxID int,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        TRANSFER,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		Records:     nil,
+		RedeemsTxID: redeemsTxID,
+		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+		Recipient:   recipient,
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewDelistTransaction removes a domain from the secondary market.
+func NewDelistTransaction(domainName string, redeemsTxID int,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        DELIST,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		Records:     nil,
+		RedeemsTxID: redeemsTxID,
+		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewFundTransaction creates a B-Coin transfer from a TrustedRegistry to a user.
+func NewFundTransaction(recipient []byte, amount uint64,
+	senderKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+	// Only TrustedRegistries may submit FUND transactions (enforced in ValidateTransactions).
+	tx := Transaction{
+		TID:        GenerateRandomTxID(txPool),
+		Type:       FUND,
+		Timestamp:  time.Now().Unix(),
+		DomainName: "",
+		Records:    nil,
+		OwnerKey:   senderKey,
+		Fee:        fee,
+		Nonce:      nonce,
+		ListPrice:  amount,    // transfer amount (reused field)
+		Recipient:  recipient, // receiver's public key
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
 	return &tx
 }
 
