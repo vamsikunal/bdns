@@ -34,19 +34,26 @@ func (t *AVLTree) DisplayInOrder() {
 	t.root.displayNodesInOrder()
 }
 
+// DomainMetadata holds mutable market/ownership state separate from the signed Transaction.
+type DomainMetadata struct {
+	ListPrice uint64 // 0 = not listed
+	OwnerKey  []byte
+}
+
 // AVLNode structure
 type AVLNode struct {
-	key    string
-	value  *blockchain.Transaction
-	height int
-	left   *AVLNode
-	right  *AVLNode
+	key      string
+	value    *blockchain.Transaction
+	metadata DomainMetadata
+	height   int
+	left     *AVLNode
+	right    *AVLNode
 }
 
 // Adds a new node
 func (n *AVLNode) add(key string, value *blockchain.Transaction) *AVLNode {
 	if n == nil {
-		return &AVLNode{key, value, 1, nil, nil}
+		return &AVLNode{key: key, value: value, height: 1}
 	}
 
 	if key < n.key {
@@ -76,6 +83,7 @@ func (n *AVLNode) remove(key string) *AVLNode {
 			rightMinNode := n.right.findSmallest()
 			n.key = rightMinNode.key
 			n.value = rightMinNode.value
+			n.metadata = rightMinNode.metadata
 			// delete smallest node that we replaced
 			n.right = n.right.remove(rightMinNode.key)
 		} else if n.left != nil {
@@ -202,6 +210,8 @@ type DomainRecord struct {
 	Domain     string
 	Records    []blockchain.Record
 	ExpirySlot int64
+	ListPrice  uint64
+	OwnerKey   []byte
 }
 
 // GetAllRecords performs in-order traversal to extract all active domain records
@@ -220,6 +230,25 @@ func (n *AVLNode) inOrderTraversal(records *[]DomainRecord) {
 		Domain:     n.value.DomainName,
 		Records:    n.value.Records,
 		ExpirySlot: n.value.ExpirySlot,
+		ListPrice:  n.metadata.ListPrice,
+		OwnerKey:   n.metadata.OwnerKey,
 	})
 	n.right.inOrderTraversal(records)
+}
+
+func (t *AVLTree) FindNodeByTxID(txID int) *AVLNode {
+	return t.root.findNodeByTxID(txID)
+}
+
+func (n *AVLNode) findNodeByTxID(txID int) *AVLNode {
+	if n == nil {
+		return nil
+	}
+	if n.value.TID == txID {
+		return n
+	}
+	if found := n.left.findNodeByTxID(txID); found != nil {
+		return found
+	}
+	return n.right.findNodeByTxID(txID)
 }

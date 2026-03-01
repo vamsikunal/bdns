@@ -71,7 +71,8 @@ func (im *IndexManager) GetIndexHash() []byte {
 			parts = append(parts, fmt.Sprintf("%s:%s:%d", rec.Type, rec.Value, rec.Priority))
 		}
 		recStr := "[" + strings.Join(parts, "|") + "]"
-		line := fmt.Sprintf("%s:%d:%s\n", r.Domain, r.ExpirySlot, recStr)
+		ownerHex := hex.EncodeToString(r.OwnerKey)
+		line := fmt.Sprintf("%s:%d:%s:%d:%s\n", r.Domain, r.ExpirySlot, recStr, r.ListPrice, ownerHex)
 		data = append(data, []byte(line)...)
 	}
 
@@ -160,4 +161,47 @@ func (im *IndexManager) AddToExpiryAndPurgeIndex(tx *blockchain.Transaction, slo
 		purgeSlot := blockchain.ComputePurgeSlot(tx.ExpirySlot, slotsPerDay)
 		im.purgeIndex[purgeSlot] = append(im.purgeIndex[purgeSlot], tx)
 	}
+}
+
+func (im *IndexManager) IsForSale(domain string) bool {
+	node := im.tree.Search(HashDomain(domain))
+	return node != nil && node.metadata.ListPrice > 0
+}
+
+func (im *IndexManager) GetListPrice(domain string) uint64 {
+	node := im.tree.Search(HashDomain(domain))
+	if node == nil {
+		return 0
+	}
+	return node.metadata.ListPrice
+}
+
+func (im *IndexManager) SetListPrice(domain string, price uint64) {
+	node := im.tree.Search(HashDomain(domain))
+	if node != nil {
+		node.metadata.ListPrice = price
+	}
+}
+
+func (im *IndexManager) SetOwner(domain string, ownerKey []byte) {
+	node := im.tree.Search(HashDomain(domain))
+	if node != nil {
+		node.metadata.OwnerKey = ownerKey
+	}
+}
+
+func (im *IndexManager) GetOwner(domain string) []byte {
+	node := im.tree.Search(HashDomain(domain))
+	if node == nil {
+		return nil
+	}
+	return node.metadata.OwnerKey
+}
+
+func (im *IndexManager) GetTxByID(txID int) *blockchain.Transaction {
+	node := im.tree.FindNodeByTxID(txID)
+	if node == nil {
+		return nil
+	}
+	return node.value
 }
