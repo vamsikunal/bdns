@@ -23,6 +23,7 @@ type IndexManager struct {
 	expiryIndex  map[int64][]*blockchain.Transaction
 	purgeIndex   map[int64][]*blockchain.Transaction
 	txLocations  map[string]*TxLocation
+	spentTxs     map[int]bool
 	currentIndex int64
 }
 
@@ -33,6 +34,7 @@ func NewIndexManager() *IndexManager {
 		expiryIndex:  make(map[int64][]*blockchain.Transaction),
 		purgeIndex:   make(map[int64][]*blockchain.Transaction),
 		txLocations:  make(map[string]*TxLocation),
+		spentTxs:     make(map[int]bool),
 		currentIndex: 0, // Corresponds to genesis block
 	}
 }
@@ -204,4 +206,12 @@ func (im *IndexManager) GetTxByID(txID int) *blockchain.Transaction {
 		return nil
 	}
 	return node.value
+}
+
+func (im *IndexManager) MarkAsSpent(txID int) {
+	im.spentTxs[txID] = true
+}
+
+func (im *IndexManager) IsSpent(txID int) bool {
+	return im.spentTxs[txID]
 }
