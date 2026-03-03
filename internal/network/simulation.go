@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strconv"
@@ -91,6 +92,13 @@ func InitializeP2PNodes(numNodes int, slotInterval int, slotsPerEpoch int, seed 
 func (n *Node) InitializeNodeAsync(ctx context.Context, chainID string, registryKeys [][]byte, initialTimestamp int64, slotInterval int64, slotsPerEpoch int64, seed float64) {
 	initialWaitTime := int64(5) // wait for initial stability (in secs)
 	n.RegistryKeys = registryKeys
+
+	// Initialize balance ledger and seed genesis balances
+	const genesisBalance = uint64(1_000_000)
+	n.BalanceLedger = blockchain.NewBalanceLedger()
+	for _, regKey := range registryKeys {
+		n.BalanceLedger.Seed(hex.EncodeToString(regKey), genesisBalance)
+	}
 
 	// Initialize blockchain first
 	n.BcMutex.Lock()

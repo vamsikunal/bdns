@@ -43,6 +43,7 @@ type Node struct {
 	HeaderChain     []blockchain.BlockHeader // Light nodes store only headers
 	cancel          context.CancelFunc       // cancels CreateBlockIfLeader goroutine
 	dnsConn         *net.UDPConn             // DNS server listener; closed by NodesCleanup
+	BalanceLedger   *blockchain.BalanceLedger
 }
 
 // Node Config

@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
@@ -75,6 +76,7 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 			tx.Type == blockchain.RENEW ||
 			(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
 			n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
+			n.IndexManager.MarkAsSpent(tx.RedeemsTxID)
 		}
 	}
 	n.BcMutex.Unlock()
@@ -99,6 +101,31 @@ func (n *Node) rollbackTransactions(transactions []blockchain.Transaction) {
 func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	n.TxMutex.Lock()
 	defer n.TxMutex.Unlock()
+
+	// Build candidate list: existing pool + new tx
+	pendingList := make([]blockchain.Transaction, 0, len(n.TransactionPool)+1)
+	for _, ptx := range n.TransactionPool {
+		pendingList = append(pendingList, *ptx)
+	}
+	pendingList = append(pendingList, *tx)
+
+	// Sort by nonce to ensure correct shadow map accumulation
+	sort.Slice(pendingList, func(i, j int) bool {
+		if pendingList[i].Nonce != pendingList[j].Nonce {
+			return pendingList[i].Nonce < pendingList[j].Nonce
+		}
+		return pendingList[i].TID < pendingList[j].TID
+	})
+
+	currentSlot := (time.Now().Unix() - n.Config.InitialTimestamp) / n.Config.SlotInterval
+	slotsPerDay := int64(86400) / n.Config.SlotInterval
+
+	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager,
+		currentSlot, slotsPerDay, false, nil) {
+		log.Printf("AddTransaction: rejected TID %d — validation failed", tx.TID)
+		return
+	}
+
 	n.TransactionPool[tx.TID] = tx
 }
 

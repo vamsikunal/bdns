@@ -353,6 +353,415 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 	return true
 }
 
+// ValidateTransactions implements the 3-gate validation model.
+// Gate 1: Signature + spent check + structural guards
+// Gate 2: Balance sufficiency (running shadow balance)
+// Gate 3: Nonce sequential equality
+func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainIndexer,
+	currentSlot int64, slotsPerDay int64,
+	isBlockValidation bool, slotLeader []byte) bool {
+
+	shadowNonce := make(map[string]uint64)
+	shadowBalance := make(map[string]uint64)
+	shadowSpent := make(map[int]bool)
+	shadowForSale := make(map[string]uint64)
+	shadowRegistered := make(map[string]bool)
+	shadowOwner := make(map[string]string)
+	shadowTx := make(map[int]*Transaction)
+
+	for _, tx := range txs {
+		// Gate 1: Signature verification
+		if len(tx.OwnerKey) > 0 {
+			if !VerifySignature(tx.OwnerKey, &tx) {
+				log.Printf("ValidateTransactions: invalid signature for domain %s", tx.DomainName)
+				return false
+			}
+		}
+
+		// Gate 1.5: RedeemsTxID double-spend check
+		if tx.RedeemsTxID != 0 && (tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE) {
+			if shadowSpent[tx.RedeemsTxID] {
+				log.Printf("ValidateTransactions: RedeemsTxID %d already spent in this block",
+					tx.RedeemsTxID)
+				return false
+			}
+			if im.IsSpent(tx.RedeemsTxID) {
+				log.Printf("ValidateTransactions: RedeemsTxID %d already spent (prior block)",
+					tx.RedeemsTxID)
+				return false
+			}
+
+			// Gate 1.5h: Domain-affinity check
+			if tx.Type != REGISTER {
+				redeemsTx, inShadow := shadowTx[tx.RedeemsTxID]
+				if !inShadow {
+					redeemsTx = im.GetTxByID(tx.RedeemsTxID)
+				}
+				if redeemsTx == nil {
+					log.Printf("ValidateTransactions: RedeemsTxID %d not found", tx.RedeemsTxID)
+					return false
+				}
+				if redeemsTx.DomainName != tx.DomainName {
+					log.Printf("ValidateTransactions: RedeemsTxID %d belongs to %s, not %s",
+						tx.RedeemsTxID, redeemsTx.DomainName, tx.DomainName)
+					return false
+				}
+			}
+
+			shadowSpent[tx.RedeemsTxID] = true
+		}
+
+		// Gate 1.5b: Reject LIST with zero price
+		if tx.Type == LIST && tx.ListPrice == 0 {
+			log.Printf("ValidateTransactions: LIST %s has ListPrice=0", tx.DomainName)
+			return false
+		}
+
+		// Gate 1.5c: Reject REGISTER/UPDATE/RENEW with empty records
+		if (tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW) && len(tx.Records) == 0 {
+			log.Printf("ValidateTransactions: %d rejected — empty records", tx.Type)
+			return false
+		}
+
+		// Gate 1.5d: Reject TRANSFER with nil/empty Recipient
+		if tx.Type == TRANSFER && len(tx.Recipient) == 0 {
+			log.Printf("ValidateTransactions: TRANSFER rejected — Recipient is empty")
+			return false
+		}
+
+		// Gate 1.5f: REGISTER must have RedeemsTxID == 0
+		if tx.Type == REGISTER && tx.RedeemsTxID != 0 {
+			log.Printf("ValidateTransactions: REGISTER rejected — RedeemsTxID must be 0")
+			return false
+		}
+
+		// Gate 1.5g: UPDATE/RENEW/REVOKE must have non-zero RedeemsTxID
+		if (tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE) && tx.RedeemsTxID == 0 {
+			log.Printf("ValidateTransactions: %d rejected — RedeemsTxID must be non-zero", tx.Type)
+			return false
+		}
+
+		// Gate 1.5e: Domain lifecycle phase check for secondary market ops
+		if tx.Type == LIST || tx.Type == DELIST || tx.Type == BUY || tx.Type == TRANSFER {
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx == nil {
+				if !shadowRegistered[tx.DomainName] {
+					log.Printf("ValidateTransactions: %d rejected — domain %s not found",
+						tx.Type, tx.DomainName)
+					return false
+				}
+			} else {
+				if !shadowRegistered[tx.DomainName] {
+					phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+					if phase != "active" {
+						log.Printf("ValidateTransactions: %d rejected — domain %s is in %s phase",
+							tx.Type, tx.DomainName, phase)
+						return false
+					}
+				}
+			}
+		}
+
+		// Auto-revocations: no OwnerKey, special handling
+		if len(tx.OwnerKey) == 0 {
+			if tx.Type == REVOKE {
+				if !isBlockValidation {
+					log.Printf("ValidateTransactions: auto-REVOKE rejected in mempool context")
+					return false
+				}
+				if !VerifySignature(slotLeader, &tx) {
+					log.Printf("ValidateTransactions: auto-REVOKE not signed by slot leader")
+					return false
+				}
+				continue
+			}
+			log.Printf("ValidateTransactions: rejected %d with empty OwnerKey", tx.Type)
+			return false
+		}
+
+		pubKeyHex := hex.EncodeToString(tx.OwnerKey)
+
+		// Read running balance
+		currentBalance := ledger.GetBalance(pubKeyHex)
+		if b, ok := shadowBalance[pubKeyHex]; ok {
+			currentBalance = b
+		}
+
+		// Gate 2: Minimum fee floor
+		const MinFee uint64 = 1
+		if tx.Fee < MinFee {
+			log.Printf("ValidateTransactions: fee too low — %s offered %d, minimum is %d",
+				pubKeyHex[:8], tx.Fee, MinFee)
+			return false
+		}
+
+		// Gate 2a: FUND restricted to TrustedRegistries
+		if tx.Type == FUND {
+			isTrusted := false
+			for _, regKey := range TrustedRegistries {
+				if hex.EncodeToString(regKey) == pubKeyHex {
+					isTrusted = true
+					break
+				}
+			}
+			if !isTrusted {
+				log.Printf("ValidateTransactions: FUND rejected — %s is not a TrustedRegistry",
+					pubKeyHex[:8])
+				return false
+			}
+			if tx.ListPrice == 0 || len(tx.Recipient) == 0 {
+				log.Printf("ValidateTransactions: FUND rejected — must have amount > 0 and recipient")
+				return false
+			}
+			// Overflow-safe arithmetic
+			totalNeeded := tx.Fee + tx.ListPrice
+			if totalNeeded < tx.Fee || totalNeeded < tx.ListPrice {
+				log.Printf("ValidateTransactions: FUND rejected — fee + amount overflows uint64")
+				return false
+			}
+			if currentBalance < totalNeeded {
+				log.Printf("ValidateTransactions: FUND rejected — %s has %d, needs %d",
+					pubKeyHex[:8], currentBalance, totalNeeded)
+				return false
+			}
+		}
+
+		// Gate 2: Balance sufficiency
+		if currentBalance < tx.Fee {
+			log.Printf("ValidateTransactions: insufficient balance — %s has %d, needs %d",
+				pubKeyHex[:8], currentBalance, tx.Fee)
+			return false
+		}
+
+		// Read running nonce
+		currentNonce := ledger.GetNonce(pubKeyHex)
+		if n, ok := shadowNonce[pubKeyHex]; ok {
+			currentNonce = n
+		}
+
+		// Gate 3: Nonce check
+		if tx.Nonce != currentNonce {
+			log.Printf("ValidateTransactions: nonce mismatch for %s — expected %d, got %d",
+				pubKeyHex[:8], currentNonce, tx.Nonce)
+			return false
+		}
+
+		// Running balance after fee
+		runningBalance := currentBalance - tx.Fee
+
+		// FUND: deduct transfer amount from running balance
+		if tx.Type == FUND {
+			runningBalance -= tx.ListPrice
+		}
+
+		// BUY: verify listing, slippage, self-buy, deduct price
+		if tx.Type == BUY {
+			sfPrice, inShadow := shadowForSale[tx.DomainName]
+			isListed := inShadow && sfPrice > 0
+			listPrice := sfPrice
+			if !inShadow {
+				isListed = im.IsForSale(tx.DomainName)
+				listPrice = im.GetListPrice(tx.DomainName)
+			}
+			if !isListed {
+				log.Printf("ValidateTransactions: BUY rejected — %s not listed ForSale",
+					tx.DomainName)
+				return false
+			}
+			if runningBalance < listPrice {
+				log.Printf("ValidateTransactions: BUY rejected — %s has %d after fee, needs %d",
+					pubKeyHex[:8], runningBalance, listPrice)
+				return false
+			}
+			if tx.ListPrice < listPrice {
+				log.Printf("ValidateTransactions: BUY rejected — buyer maxPrice %d < listPrice %d",
+					tx.ListPrice, listPrice)
+				return false
+			}
+			runningBalance -= listPrice
+
+			// Self-buy guard
+			currentOwner := ""
+			if so, ok := shadowOwner[tx.DomainName]; ok {
+				currentOwner = so
+			} else {
+				owner := im.GetOwner(tx.DomainName)
+				if owner != nil {
+					currentOwner = hex.EncodeToString(owner)
+				}
+			}
+			if currentOwner == pubKeyHex {
+				log.Printf("ValidateTransactions: BUY rejected — buyer %s is also the owner",
+					pubKeyHex[:8])
+				return false
+			}
+
+			shadowForSale[tx.DomainName] = 0
+		}
+
+		// LIST/DELIST: ownership check + shadow state
+		if tx.Type == LIST || tx.Type == DELIST {
+			currentOwner := ""
+			if so, ok := shadowOwner[tx.DomainName]; ok {
+				currentOwner = so
+			} else {
+				owner := im.GetOwner(tx.DomainName)
+				if owner != nil {
+					currentOwner = hex.EncodeToString(owner)
+				}
+			}
+			if currentOwner != pubKeyHex {
+				log.Printf("ValidateTransactions: %d rejected — %s is not the owner of %s",
+					tx.Type, pubKeyHex[:8], tx.DomainName)
+				return false
+			}
+			if tx.Type == LIST {
+				shadowForSale[tx.DomainName] = tx.ListPrice
+			} else {
+				isListed := false
+				if sfPrice, inShadow := shadowForSale[tx.DomainName]; inShadow {
+					isListed = sfPrice > 0
+				} else {
+					isListed = im.IsForSale(tx.DomainName)
+				}
+				if !isListed {
+					log.Printf("ValidateTransactions: DELIST rejected — %s is not listed for sale",
+						tx.DomainName)
+					return false
+				}
+				shadowForSale[tx.DomainName] = 0
+			}
+		}
+
+		// UPDATE/REVOKE: existence + phase + ownership check
+		if tx.Type == UPDATE || tx.Type == REVOKE {
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx == nil {
+				if !shadowRegistered[tx.DomainName] {
+					log.Printf("ValidateTransactions: %d rejected — domain %s does not exist",
+						tx.Type, tx.DomainName)
+					return false
+				}
+			} else {
+				if !shadowRegistered[tx.DomainName] {
+					phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+					if phase == "purged" {
+						log.Printf("ValidateTransactions: %d rejected — domain %s is in purged phase",
+							tx.Type, tx.DomainName)
+						return false
+					}
+				}
+			}
+			currentOwner := ""
+			if so, ok := shadowOwner[tx.DomainName]; ok {
+				currentOwner = so
+			} else {
+				owner := im.GetOwner(tx.DomainName)
+				if owner != nil {
+					currentOwner = hex.EncodeToString(owner)
+				}
+			}
+			if currentOwner != pubKeyHex {
+				log.Printf("ValidateTransactions: %d rejected — %s is not the owner of %s",
+					tx.Type, pubKeyHex[:8], tx.DomainName)
+				return false
+			}
+		}
+
+		// RENEW: separate validation — TrustedRegistry signer, no ownership check
+		if tx.Type == RENEW {
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx == nil {
+				if !shadowRegistered[tx.DomainName] {
+					log.Printf("ValidateTransactions: RENEW rejected — domain %s does not exist",
+						tx.DomainName)
+					return false
+				}
+			} else {
+				if !shadowRegistered[tx.DomainName] {
+					phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+					if phase == "purged" {
+						log.Printf("ValidateTransactions: RENEW rejected — domain %s is in purged phase",
+							tx.DomainName)
+						return false
+					}
+				}
+			}
+			isTrusted := false
+			for _, regKey := range TrustedRegistries {
+				if hex.EncodeToString(regKey) == pubKeyHex {
+					isTrusted = true
+					break
+				}
+			}
+			if !isTrusted {
+				log.Printf("ValidateTransactions: RENEW rejected — %s is not a TrustedRegistry",
+					pubKeyHex[:8])
+				return false
+			}
+		}
+
+		// REGISTER: track + validate
+		if tx.Type == REGISTER {
+			if !IsRegistryKey(tx.OwnerKey) {
+				log.Printf("ValidateTransactions: REGISTER rejected — %s is not a TrustedRegistry",
+					pubKeyHex[:8])
+				return false
+			}
+			if shadowRegistered[tx.DomainName] {
+				log.Printf("ValidateTransactions: REGISTER rejected — %s already registered in this block",
+					tx.DomainName)
+				return false
+			}
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx != nil {
+				phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+				if phase != "purged" {
+					log.Printf("ValidateTransactions: REGISTER rejected — %s exists in %s phase",
+						tx.DomainName, phase)
+					return false
+				}
+			}
+			shadowRegistered[tx.DomainName] = true
+			shadowOwner[tx.DomainName] = pubKeyHex
+		}
+
+		// TRANSFER: ownership check + shadow update
+		if tx.Type == TRANSFER {
+			currentOwner := ""
+			if so, ok := shadowOwner[tx.DomainName]; ok {
+				currentOwner = so
+			} else {
+				owner := im.GetOwner(tx.DomainName)
+				if owner != nil {
+					currentOwner = hex.EncodeToString(owner)
+				}
+			}
+			if currentOwner != pubKeyHex {
+				log.Printf("ValidateTransactions: TRANSFER rejected — %s is not the owner of %s",
+					pubKeyHex[:8], tx.DomainName)
+				return false
+			}
+			shadowOwner[tx.DomainName] = hex.EncodeToString(tx.Recipient)
+			shadowForSale[tx.DomainName] = 0
+		}
+		if tx.Type == BUY {
+			shadowOwner[tx.DomainName] = pubKeyHex
+		}
+
+		// Update running shadow state
+		shadowNonce[pubKeyHex] = currentNonce + 1
+		shadowBalance[pubKeyHex] = runningBalance
+
+		// Populate shadowTx for state-mutating ops (same-block provenance chaining)
+		if tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE {
+			txCopy := tx
+			shadowTx[tx.TID] = &txCopy
+		}
+	}
+	return true
+}
+
 func (b *Block) ValidateTransactions(slotsPerDay int64) bool {
 	for _, tx := range b.Transactions {
 		switch tx.Type {
