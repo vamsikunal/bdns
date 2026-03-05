@@ -14,28 +14,30 @@ import (
 )
 
 type Block struct {
-	Index          int64
-	Timestamp      int64  // Not Required
-	SlotNumber     int64  // Discrete slot identifier for deterministic timing
-	SlotLeader     []byte
-	Signature      []byte
-	IndexHash      []byte
-	MerkleRootHash []byte
-	StakeData      map[string]int // Registry Public Key -> Stake
-	Transactions   []Transaction
-	PrevHash       []byte
-	Hash           []byte
+	Index              int64
+	Timestamp          int64  // Not Required
+	SlotNumber         int64  // Discrete slot identifier for deterministic timing
+	SlotLeader         []byte
+	Signature          []byte
+	IndexHash          []byte
+	BalanceLedgerHash  []byte
+	MerkleRootHash     []byte
+	StakeData          map[string]int // Registry Public Key -> Stake
+	Transactions       []Transaction
+	PrevHash           []byte
+	Hash               []byte
 }
 
-func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
+func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
 	block := &Block{
-		Index:        index,
-		Timestamp:    time.Now().Unix(),
-		SlotNumber:   slotNumber, // Set slot number
-		SlotLeader:   slotLeader,
-		IndexHash:    indexHash,
-		Transactions: transactions,
-		PrevHash:     prevHash,
+		Index:             index,
+		Timestamp:         time.Now().Unix(),
+		SlotNumber:        slotNumber,
+		SlotLeader:        slotLeader,
+		IndexHash:         indexHash,
+		BalanceLedgerHash: balanceLedgerHash,
+		Transactions:      transactions,
+		PrevHash:          prevHash,
 	}
 
 	block.MerkleRootHash = block.SetupMerkleTree()
@@ -198,6 +200,7 @@ func (b *Block) ComputeHash() []byte {
 			b.SlotLeader,
 			b.Signature,
 			b.IndexHash,
+			b.BalanceLedgerHash,
 			b.MerkleRootHash,
 			stakeDataBytes,
 			b.PrevHash,
@@ -279,48 +282,46 @@ func ValidateGenesisBlock(block *Block, registryKeys [][]byte, slotLeaderKey []b
 	return true
 }
 
-func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expiryChecker ExpiryChecker, slotsPerDay int64) bool {
+func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
+	ledger *BalanceLedger, im DomainIndexer, expiryChecker ExpiryChecker,
+	slotsPerDay int64) (*BalanceLedger, bool) {
+
 	if oldBlock.Index+1 != newBlock.Index {
-		return false
+		return nil, false
 	}
 
 	if newBlock.SlotNumber <= oldBlock.SlotNumber {
-		return false
+		return nil, false
 	}
 
 	if !bytes.Equal(oldBlock.Hash, newBlock.PrevHash) {
-		return false
+		return nil, false
 	}
 
 	if !bytes.Equal(newBlock.SlotLeader, slotLeaderKey) {
-		return false
+		return nil, false
 	}
 
 	if !newBlock.VerifyBlock(slotLeaderKey) {
-		return false
+		return nil, false
 	}
 
 	if !bytes.Equal(newBlock.MerkleRootHash, newBlock.SetupMerkleTree()) {
-		return false
+		return nil, false
 	}
 
 	if !areStakesEqual(newBlock.StakeData, newBlock.SetupStakeData(oldBlock.StakeData)) {
-		return false
-	}
-
-	if !newBlock.ValidateTransactions(slotsPerDay) {
-		return false
+		return nil, false
 	}
 
 	if !bytes.Equal(newBlock.Hash, newBlock.ComputeHash()) {
-		return false
+		return nil, false
 	}
 
-	// Validate all required purge-slot revocations are present in the block
+	// Purge-slot revocation check
 	if expiryChecker != nil {
 		expectedPurges := expiryChecker.GetPurgeableDomains(newBlock.SlotNumber)
 
-		// Build set of domains renewed in this block
 		renewedInBlock := make(map[string]bool)
 		for _, tx := range newBlock.Transactions {
 			if tx.Type == RENEW {
@@ -329,7 +330,6 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 		}
 
 		for _, expected := range expectedPurges {
-			// Skip domains that were renewed
 			if renewedInBlock[expected.DomainName] {
 				continue
 			}
@@ -345,12 +345,48 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte, expir
 			}
 			if !found {
 				log.Println("Block missing required purge:", expected.DomainName, "TID:", expected.TID)
-				return false
+				return nil, false
 			}
 		}
 	}
 
-	return true
+	// 3-gate re-check: malicious leader may bypass mempool
+	if !ValidateTransactions(newBlock.Transactions, ledger, im,
+		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader) {
+		log.Printf("ValidateBlock: ValidateTransactions failed — block rejected")
+		return nil, false
+	}
+
+	// nonce + fee on staging clone
+	staging := ledger.Clone()
+	for _, tx := range newBlock.Transactions {
+		ApplyLedgerMutations(tx, staging)
+	}
+	totalFees := uint64(0)
+	for _, tx := range newBlock.Transactions {
+		totalFees += tx.Fee
+	}
+	if totalFees > 0 {
+		staging.Credit(hex.EncodeToString(newBlock.SlotLeader), totalFees)
+	}
+	if !bytes.Equal(newBlock.BalanceLedgerHash, staging.Hash()) {
+		log.Printf("ValidateBlock: BalanceLedgerHash mismatch — block rejected")
+		return nil, false
+	}
+
+	// domain mutations on overlay
+	for i, tx := range newBlock.Transactions {
+		ApplyDomainMutations(tx, staging, im, newBlock.SlotNumber, i, slotsPerDay)
+	}
+	if !bytes.Equal(newBlock.IndexHash, im.GetIndexHash()) {
+		log.Printf("ValidateBlock: IndexHash mismatch — block rejected")
+		return nil, false
+	}
+
+	// commit overlay to real state
+	im.Commit()
+
+	return staging, true
 }
 
 // ValidateTransactions implements the 3-gate validation model.
@@ -757,23 +793,6 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 		if tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE {
 			txCopy := tx
 			shadowTx[tx.TID] = &txCopy
-		}
-	}
-	return true
-}
-
-func (b *Block) ValidateTransactions(slotsPerDay int64) bool {
-	for _, tx := range b.Transactions {
-		switch tx.Type {
-		case REGISTER, UPDATE, RENEW:
-			if len(tx.Records) == 0 {
-				log.Printf("ValidateTransactions: %d transaction has no records (domain: %s)", tx.Type, tx.DomainName)
-				return false
-			}
-		}
-
-		if !VerifyTransaction(tx.OwnerKey, &tx, b.SlotNumber, slotsPerDay) {
-			return false
 		}
 	}
 	return true
