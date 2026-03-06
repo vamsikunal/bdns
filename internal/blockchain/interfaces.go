@@ -17,6 +17,8 @@ type DomainIndexer interface {
 	GetListPrice(domain string) uint64
 	IsForSale(domain string) bool
 	GetTxByID(txID int) *Transaction
+	GetIndexHash() []byte
 	MarkAsSpent(txID int)
 	IsSpent(txID int) bool
+	Commit()
 }
