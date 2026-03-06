@@ -215,3 +215,7 @@ func (im *IndexManager) MarkAsSpent(txID int) {
 func (im *IndexManager) IsSpent(txID int) bool {
 	return im.spentTxs[txID]
 }
+
+func (im *IndexManager) Commit() {
+	// no-op: IndexManager is the real state — nothing to flush
+}

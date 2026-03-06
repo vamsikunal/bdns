@@ -3,6 +3,7 @@ package network
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/consensus"
+	"github.com/bleasey/bdns/internal/index"
 )
 
 func (n *Node) GetSlotLeader(epoch int64) []byte {
@@ -117,59 +119,52 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 		}
 		n.BcMutex.Unlock()
 
-		// Apply transactions to index BEFORE creating block (for IndexHash)
+		// Phase A: nonce + fee on staging clone
 		n.TxMutex.Lock()
 		slotsPerDay := int64(86400) / n.Config.SlotInterval
-		for i := range transactions {
-			tx := &transactions[i]
-			switch tx.Type {
 
-			case blockchain.REGISTER:
-				n.IndexManager.Add(tx.DomainName, tx, latestBlock.Index+1, i, slotsPerDay)
-
-			case blockchain.UPDATE:
-				if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
-					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
-				}
-				n.IndexManager.Update(tx.DomainName, tx)
-
-			case blockchain.REVOKE:
-				if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
-					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
-				}
-				n.IndexManager.Remove(tx.DomainName)
-
-			case blockchain.RENEW:
-				if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
-					n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
-				}
-				n.IndexManager.Update(tx.DomainName, tx)
-				n.IndexManager.AddToExpiryAndPurgeIndex(tx, slotsPerDay)
-			}
+		staging := n.BalanceLedger.Clone()
+		for _, tx := range transactions {
+			blockchain.ApplyLedgerMutations(tx, staging)
 		}
+		totalFees := uint64(0)
+		for _, tx := range transactions {
+			totalFees += tx.Fee
+		}
+		if totalFees > 0 {
+			staging.Credit(hex.EncodeToString(n.KeyPair.PublicKey), totalFees)
+		}
+
+		// Phase B: domain mutations on overlay
+		imOverlay := index.NewIndexOverlay(n.IndexManager)
+		for i, tx := range transactions {
+			blockchain.ApplyDomainMutations(tx, staging, imOverlay, slot, i, slotsPerDay)
+		}
+
+		balanceLedgerHash := staging.Hash()
+		indexHash := imOverlay.GetIndexHash()
 		n.TxMutex.Unlock()
 
-		// Compute IndexHash AFTER applying transactions
-		indexHash := n.IndexManager.GetIndexHash()
+		// Seal block
+		newBlock := blockchain.NewBlock(latestBlock.Index+1, slot, currSlotLeader,
+			indexHash, balanceLedgerHash, transactions, latestBlock.Hash,
+			latestBlock.StakeData, &n.KeyPair.PrivateKey)
 
-		// Create block WITH IndexHash
-		newBlock := blockchain.NewBlock(latestBlock.Index+1, slot, currSlotLeader, indexHash, transactions, latestBlock.Hash, latestBlock.StakeData, &n.KeyPair.PrivateKey)
+		// Phase C: commit overlay to real state
+		n.BalanceLedger = staging
+		imOverlay.Commit()
 
-		// ATOMIC: Add block AND mark spent under same lock
+		// Persist block + BoltDB spent markers
 		n.BcMutex.Lock()
 		n.Blockchain.AddBlock(newBlock)
-
-		// Mark spent TxIDs (inside same lock for atomicity)
 		for _, tx := range transactions {
-			if tx.Type == blockchain.UPDATE ||
-				tx.Type == blockchain.RENEW ||
-				(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
+			if tx.RedeemsTxID != 0 && (tx.Type == blockchain.UPDATE ||
+				tx.Type == blockchain.RENEW || tx.Type == blockchain.REVOKE) {
 				n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
 			}
 		}
 		n.BcMutex.Unlock()
 
-		// Broadcast to others (outside lock)
 		n.P2PNetwork.BroadcastMessage(MsgBlock, *newBlock, nil)
 		fmt.Print("Block ", newBlock.Index, " created and broadcasted by node ", n.Address, "\n\n")
 	}

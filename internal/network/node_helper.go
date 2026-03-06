@@ -7,95 +7,43 @@ import (
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
+	"github.com/bleasey/bdns/internal/index"
 )
 
 func (n *Node) AddBlock(block *blockchain.Block) {
 	epoch := (block.Timestamp - n.Config.InitialTimestamp) / (n.Config.SlotInterval * n.Config.SlotsPerEpoch)
 	slotLeader := n.GetSlotLeader(epoch)
-
-	// Verify received block (pass IndexManager for expiration validation)
 	slotsPerDay := int64(86400) / n.Config.SlotInterval
-	if (block.Index == 0 && !blockchain.ValidateGenesisBlock(block, n.RegistryKeys, slotLeader)) ||
-		(block.Index != 0 && !blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(), slotLeader, n.IndexManager, slotsPerDay)) {
-		log.Println("Invalid block received at ", n.Address)
-		return
-	}
 
-	// Update index tree
-	n.TxMutex.Lock()
-	for i := range block.Transactions {
-		tx := &block.Transactions[i]
-		switch tx.Type {
-		case blockchain.REGISTER:
-			n.IndexManager.Add(tx.DomainName, tx, block.Index, i, slotsPerDay)
-
-		case blockchain.UPDATE:
-			// Remove old tx from expiry index before updating
-			if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
-				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
-			}
-			n.IndexManager.Update(tx.DomainName, tx)
-
-		case blockchain.REVOKE:
-			// Remove from expiry index before removing from tree
-			if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
-				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
-			}
-			n.IndexManager.Remove(tx.DomainName)
-
-		case blockchain.RENEW:
-			// Remove old expiry/purge entries, re-add with new ExpirySlot
-			if oldTx := n.IndexManager.GetDomain(tx.DomainName); oldTx != nil {
-				n.IndexManager.RemoveFromExpiryIndex(oldTx, slotsPerDay)
-			}
-			n.IndexManager.Update(tx.DomainName, tx)
-			n.IndexManager.AddToExpiryAndPurgeIndex(tx, slotsPerDay)
+	if block.Index == 0 {
+		if !blockchain.ValidateGenesisBlock(block, n.RegistryKeys, slotLeader) {
+			log.Println("Invalid genesis block received at", n.Address)
+			return
 		}
+	} else {
+		imOverlay := index.NewIndexOverlay(n.IndexManager)
+		staging, ok := blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(),
+			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay)
+		if !ok {
+			log.Println("Invalid block received at", n.Address)
+			return
+		}
+		n.BalanceLedger = staging
 	}
+
+	n.TxMutex.Lock()
 	blockchain.RemoveTxsFromPool(block.Transactions, n.TransactionPool)
 	n.TxMutex.Unlock()
 
-	// Validate IndexHash after applying transactions
-	expectedHash := n.IndexManager.GetIndexHash()
-	if !bytes.Equal(block.IndexHash, expectedHash) {
-		log.Println("IndexHash mismatch - rejecting block and rolling back at", n.Address)
-		// ROLLBACK: Reverse the transactions we just applied
-		n.TxMutex.Lock()
-		n.rollbackTransactions(block.Transactions)
-		n.TxMutex.Unlock()
-		return
-	}
-
-	// ATOMIC: Lock mutex for BOTH AddBlock AND MarkAsSpent
 	n.BcMutex.Lock()
 	n.Blockchain.AddBlock(block)
-
-	// Mark spent TxIDs
 	for _, tx := range block.Transactions {
-		if tx.Type == blockchain.UPDATE ||
-			tx.Type == blockchain.RENEW ||
-			(tx.Type == blockchain.REVOKE && tx.RedeemsTxID != 0) {
+		if tx.RedeemsTxID != 0 && (tx.Type == blockchain.UPDATE ||
+			tx.Type == blockchain.RENEW || tx.Type == blockchain.REVOKE) {
 			n.Blockchain.MarkAsSpent(tx.RedeemsTxID)
-			n.IndexManager.MarkAsSpent(tx.RedeemsTxID)
 		}
 	}
 	n.BcMutex.Unlock()
-}
-
-// rollbackTransactions reverses applied transactions on validation failure
-func (n *Node) rollbackTransactions(transactions []blockchain.Transaction) {
-	// Reverse iterate and undo each operation
-	for i := len(transactions) - 1; i >= 0; i-- {
-		tx := transactions[i]
-		switch tx.Type {
-		case blockchain.REGISTER:
-			n.IndexManager.Remove(tx.DomainName)
-		case blockchain.UPDATE:
-			log.Println("Warning: UPDATE rollback - domain state may be inconsistent:", tx.DomainName)
-		case blockchain.REVOKE:
-			log.Println("Warning: REVOKE rollback - cannot restore domain:", tx.DomainName)
-		}
-	}
 }
 
 func (n *Node) AddTransaction(tx *blockchain.Transaction) {
