@@ -1,6 +1,7 @@
 package sims
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"os"
@@ -79,7 +80,41 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 		go func(node *network.Node, id int) {
 			defer wg.Done()
 
+			pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+			pendingNonce := make(map[string]uint64)
+			lastSeenBlock := int64(-1)
+
+			getNextNonce := func(pkHex string) uint64 {
+				if _, seen := pendingNonce[pkHex]; !seen {
+					pendingNonce[pkHex] = node.BalanceLedger.GetNonce(pkHex)
+				}
+				return pendingNonce[pkHex]
+			}
+
+			commitNonce := func(pkHex string) {
+				pendingNonce[pkHex]++
+			}
+
+			onBlockCommit := func() {
+				for pkHex, pending := range pendingNonce {
+					confirmed := node.BalanceLedger.GetNonce(pkHex)
+					if confirmed >= pending {
+						delete(pendingNonce, pkHex)
+					}
+				}
+			}
+
 			for time.Now().Before(simStopTime) {
+				if node.Blockchain != nil {
+					node.BcMutex.Lock()
+					latest := node.Blockchain.GetLatestBlock()
+					node.BcMutex.Unlock()
+					if latest != nil && latest.Index > lastSeenBlock {
+						onBlockCommit()
+						lastSeenBlock = latest.Index
+					}
+				}
+
 				// Chance to create transaction
 				if rand.Float64() < txProbability {
 					domainsMu.Lock()
@@ -89,8 +124,10 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					ip := fmt.Sprintf("10.0.%d.%d", id+1, rand.Intn(255))
 					ttl := int64(3600)
 					records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
-							tx := blockchain.NewTransaction(blockchain.REGISTER, domain, records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool, 0, 0)
+					nonce := getNextNonce(pubKeyHex)
+					tx := blockchain.NewTransaction(blockchain.REGISTER, domain, records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool, 1, nonce)
 					node.BroadcastTransaction(*tx)
+					commitNonce(pubKeyHex)
 					fmt.Printf("Node %d sent transaction for domain %s\n", id+1, domain)
 
 					domainsMu.Lock()
@@ -120,6 +157,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 						recordsCopy := make([]blockchain.Record, len(oldTx.Records))
 						copy(recordsCopy, oldTx.Records)
 
+						nonce := getNextNonce(pubKeyHex)
 						tx := blockchain.NewRenewTransaction(
 							domain,
 							recordsCopy,
@@ -127,12 +165,13 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 							oldTx.ExpirySlot,
 							slotsPerDay,
 							oldTx.TID,
-							node.KeyPair.PublicKey, // registry key
+							node.KeyPair.PublicKey,
 							&node.KeyPair.PrivateKey,
 							node.TransactionPool,
-							0, 0,
+							1, nonce,
 						)
 						node.BroadcastTransaction(*tx)
+						commitNonce(pubKeyHex)
 						fmt.Printf("Node %d renewed domain %s (old expiry: %d, new expiry: %d)\n",
 							id+1, domain, oldTx.ExpirySlot, tx.ExpirySlot)
 						atomic.AddInt64(&totalTxns, 1)
