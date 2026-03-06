@@ -1,6 +1,7 @@
 package sims
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ func FeatureSim() {
 
 	// Use a single node for all registrations
 	reg := nodes[0]
+	regPubKeyHex := hex.EncodeToString(reg.KeyPair.PublicKey)
+	regNonce := reg.BalanceLedger.GetNonce(regPubKeyHex)
 
 	// Register domains with diverse record sets
 	canonicalRecords := []blockchain.Record{
@@ -40,21 +43,24 @@ func FeatureSim() {
 		{Type: "MX", Value: "backup-mail.canonical.bdns", Priority: 20},
 		{Type: "TXT", Value: "v=spf1 include:canonical.bdns ~all", Priority: 0},
 	}
-	registerDomain(reg, "canonical.bdns", canonicalRecords)
+	registerDomain(reg, "canonical.bdns", canonicalRecords, 1, regNonce)
+	regNonce++
 	fmt.Println("[REGISTER] canonical.bdns — A, AAAA, 2×MX, TXT")
 	time.Sleep(1 * time.Second)
 
 	aliasRecords := []blockchain.Record{
 		{Type: "CNAME", Value: "canonical.bdns", Priority: 0},
 	}
-	registerDomain(reg, "alias.bdns", aliasRecords)
+	registerDomain(reg, "alias.bdns", aliasRecords, 1, regNonce)
+	regNonce++
 	fmt.Println("[REGISTER] alias.bdns — CNAME → canonical.bdns")
 	time.Sleep(1 * time.Second)
 
 	deepRecords := []blockchain.Record{
 		{Type: "CNAME", Value: "alias.bdns", Priority: 0},
 	}
-	registerDomain(reg, "deep.bdns", deepRecords)
+	registerDomain(reg, "deep.bdns", deepRecords, 1, regNonce)
+	regNonce++
 	fmt.Println("[REGISTER] deep.bdns — CNAME → alias.bdns (2-hop chain)")
 	time.Sleep(1 * time.Second)
 
@@ -62,7 +68,8 @@ func FeatureSim() {
 		{Type: "MX", Value: "mail1.mx-only.bdns", Priority: 5},
 		{Type: "MX", Value: "mail2.mx-only.bdns", Priority: 10},
 	}
-	registerDomain(reg, "mx-only.bdns", mxOnlyRecords)
+	registerDomain(reg, "mx-only.bdns", mxOnlyRecords, 1, regNonce)
+	regNonce++
 	fmt.Println("[REGISTER] mx-only.bdns — 2×MX (no A)")
 	time.Sleep(1 * time.Second)
 
@@ -70,7 +77,8 @@ func FeatureSim() {
 		{Type: "A", Value: "10.0.5.5", Priority: 0},
 		{Type: "TXT", Value: "initial-registration", Priority: 0},
 	}
-	registerDomain(reg, "renew-me.bdns", renewableRecords)
+	registerDomain(reg, "renew-me.bdns", renewableRecords, 1, regNonce)
+	regNonce++
 	fmt.Println("[REGISTER] renew-me.bdns — A + TXT (will be renewed)")
 
 	// Wait for registrations to be committed
@@ -101,6 +109,8 @@ func FeatureSim() {
 			{Type: "TXT", Value: "renewed-registration", Priority: 0},
 		}
 		slotsPerDay := int64(86400 / slotInterval)
+		qnPubKeyHex := hex.EncodeToString(queryNode.KeyPair.PublicKey)
+		qnNonce := queryNode.BalanceLedger.GetNonce(qnPubKeyHex)
 		tx := blockchain.NewRenewTransaction(
 			"renew-me.bdns",
 			updatedRecords,
@@ -108,10 +118,10 @@ func FeatureSim() {
 			oldTx.ExpirySlot,
 			slotsPerDay,
 			oldTx.TID,
-			queryNode.KeyPair.PublicKey, 
+			queryNode.KeyPair.PublicKey,
 			&queryNode.KeyPair.PrivateKey,
 			queryNode.TransactionPool,
-			0, 0,
+			1, qnNonce,
 		)
 		queryNode.BroadcastTransaction(*tx)
 		fmt.Printf("[RENEW] renew-me.bdns — updated records (old expiry: %d, new expiry: %d)\n",
@@ -191,7 +201,7 @@ func FeatureSim() {
 }
 
 // registerDomain is a helper that calls NewTransaction and broadcasts it.
-func registerDomain(node *network.Node, domain string, records []blockchain.Record) {
+func registerDomain(node *network.Node, domain string, records []blockchain.Record, fee uint64, nonce uint64) {
 	const ttl = int64(3600)
 	const slotsPerDay = int64(86400 / 5) // 5s slots
 	tx := blockchain.NewTransaction(
@@ -203,7 +213,7 @@ func registerDomain(node *network.Node, domain string, records []blockchain.Reco
 		node.KeyPair.PublicKey,
 		&node.KeyPair.PrivateKey,
 		node.TransactionPool,
-		0, 0,
+		fee, nonce,
 	)
 	node.BroadcastTransaction(*tx)
 }
