@@ -51,6 +51,8 @@ func InitializeP2PNodes(numNodes int, slotInterval int, slotsPerEpoch int, seed 
 		}
 	}
 
+	blockchain.InitTrustedRegistries(registryKeys)
+
 	currTimestamp := time.Now().Unix()
 
 	// Initialize nodes given registryKeys and params
