@@ -92,6 +92,17 @@ func TestNetworks(t *testing.T) {
 	}
 }
 
+func TestSimpleSim(t *testing.T) {
+	fmt.Println("\n=== Running Simple Sim Test ===")
+
+	if err := sims.CleanChainData(); err != nil {
+		t.Fatalf("Failed to clean chaindata: %v", err)
+	}
+	time.Sleep(3 * time.Second)
+
+	sims.SimpleSim()
+}
+
 func TestFeatures(t *testing.T) {
 	fmt.Println("\n=== Running Multi-Record Feature Test ===")
 
@@ -101,4 +112,15 @@ func TestFeatures(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	sims.FeatureSim()
+}
+
+func TestLedger(t *testing.T) {
+	fmt.Println("\n=== Running Trustless Ledger Test ===")
+
+	if err := sims.CleanChainData(); err != nil {
+		t.Fatalf("Failed to clean chaindata: %v", err)
+	}
+	time.Sleep(3 * time.Second)
+
+	sims.LedgerSim()
 }
