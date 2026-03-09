@@ -26,7 +26,12 @@ type Block struct {
 	Transactions       []Transaction
 	PrevHash           []byte
 	Hash               []byte
+	CommitStoreHash []byte
+	StakeMapHash     []byte
+	UnstakeQueueHash []byte
+	DRGSeed          float64
 }
+
 
 func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
 	block := &Block{

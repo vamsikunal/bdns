@@ -16,15 +16,20 @@ import (
 type TransactionType uint8
 
 const (
-	REGISTER TransactionType = iota
-	UPDATE
-	REVOKE
-	RENEW
-	LIST
-	BUY
-	TRANSFER
-	DELIST
-	FUND
+	REGISTER TransactionType = iota 
+	UPDATE                          
+	REVOKE                          
+	RENEW                           
+	LIST                            
+	BUY                             
+	TRANSFER                        
+	DELIST                          
+	FUND                            
+	COMMIT 
+	REVEAL 
+	STAKE              
+	UNSTAKE            
+	EQUIVOCATION_PROOF 
 )
 
 // Record represents a single DNS record entry.
@@ -62,7 +67,12 @@ type Transaction struct {
 	Nonce       uint64   // Per-account monotonic counter to prevents replay attacks
 	ListPrice   uint64   // Asking price in B-Coins (non-zero only for LIST transactions)
 	Recipient   []byte   // Recipient's public key (non-nil only for TRANSFER/FUND transactions)
-	Signature   []byte   
+	Signature   []byte
+	CommitHash []byte // SHA-256 commit hash (COMMIT transactions)
+	Salt       []byte // Random salt revealed in REVEAL transactions
+	StakeAmount uint64 // Amount of B-Coins to stake/unstake (STAKE/UNSTAKE)
+	EquivBlockA []byte // Serialized first block evidence (EQUIVOCATION_PROOF)
+	EquivBlockB []byte // Serialized second (conflicting) block evidence (EQUIVOCATION_PROOF)
 }
 
 func NewTransaction(txType TransactionType, domainName string, records []Record, cacheTTL int64,
