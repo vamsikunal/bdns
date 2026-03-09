@@ -244,6 +244,70 @@ func NewFundTransaction(recipient []byte, amount uint64,
 	return &tx
 }
 
+// NewStakeTransaction creates a STAKE transaction that moves B-Coins from the
+// sender's liquid balance into their staked balance.
+func NewStakeTransaction(amount uint64,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        STAKE,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  "",
+		Records:     nil,
+		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+		StakeAmount: amount,
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewUnstakeTransaction creates an UNSTAKE transaction that queues B-Coins for
+// return to the sender's liquid balance after the unbonding delay elapses.
+func NewUnstakeTransaction(amount uint64,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        UNSTAKE,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  "",
+		Records:     nil,
+		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+		StakeAmount: amount,
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewEquivocationProofTransaction creates an EQUIVOCATION_PROOF transaction
+func NewEquivocationProofTransaction(blockA *Block, blockB *Block,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+	// Both blocks must be fully serialized (including transactions)
+	// so that validators can reconstruct and verify the conflicting signatures.
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        EQUIVOCATION_PROOF,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  "",
+		Records:     nil,
+		OwnerKey:    ownerKey,
+		Fee:         fee,
+		Nonce:       nonce,
+		EquivBlockA: blockA.Serialize(),
+		EquivBlockB: blockB.Serialize(),
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
 func SignTransaction(privateKey *ecdsa.PrivateKey, tx *Transaction) []byte {
 	txData := tx.SerializeForSigning()
 	hash := sha256.Sum256(txData)
@@ -327,6 +391,12 @@ func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64
 			return false
 		}
 		return true
+
+	case LIST, BUY, TRANSFER, DELIST, FUND:
+		return VerifySignature(publicKeyBytes, tx)
+
+	case COMMIT, REVEAL, STAKE, UNSTAKE, EQUIVOCATION_PROOF:
+		return VerifySignature(tx.OwnerKey, tx)
 	}
 
 	return false
@@ -429,6 +499,28 @@ func (tx *Transaction) SerializeForSigning() []byte {
 	txData = append(txData, IntToByteArr(int64(tx.Nonce))...)
 	txData = append(txData, IntToByteArr(int64(tx.ListPrice))...)
 	txData = append(txData, tx.Recipient...)
+
+	// New fields are only appended when non-zero/non-empty to preserve
+	// byte-identical serialization for all existing transaction types.
+	if len(tx.CommitHash) > 0 {
+		txData = append(txData, IntToByteArr(int64(len(tx.CommitHash)))...)
+		txData = append(txData, tx.CommitHash...)
+	}
+	if len(tx.Salt) > 0 {
+		txData = append(txData, IntToByteArr(int64(len(tx.Salt)))...)
+		txData = append(txData, tx.Salt...)
+	}
+	if tx.StakeAmount > 0 {
+		txData = append(txData, IntToByteArr(int64(tx.StakeAmount))...)
+	}
+	if len(tx.EquivBlockA) > 0 {
+		txData = append(txData, IntToByteArr(int64(len(tx.EquivBlockA)))...)
+		txData = append(txData, tx.EquivBlockA...)
+	}
+	if len(tx.EquivBlockB) > 0 {
+		txData = append(txData, IntToByteArr(int64(len(tx.EquivBlockB)))...)
+		txData = append(txData, tx.EquivBlockB...)
+	}
 
 	return txData
 }
