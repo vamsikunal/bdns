@@ -22,3 +22,13 @@ type DomainIndexer interface {
 	IsSpent(txID int) bool
 	Commit()
 }
+
+// CommitStorer abstracts the pending commits store for validation.
+// Implemented by CommitStore (real state) and CommitOverlay (staging).
+type CommitStorer interface {
+	AddCommit(record *CommitRecord)
+	GetCommit(commitHashHex string) *CommitRecord
+	ConsumeCommit(commitHashHex string)
+	PurgeExpired(currentBlockIndex int64) int
+	Hash() []byte
+}
