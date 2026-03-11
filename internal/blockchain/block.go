@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"log"
 	"math/big"
-	"sort"
 	"time"
 )
 
@@ -22,18 +21,22 @@ type Block struct {
 	IndexHash          []byte
 	BalanceLedgerHash  []byte
 	MerkleRootHash     []byte
-	StakeData          map[string]int // Registry Public Key -> Stake
+	StakeData          map[string]uint64 // Registry Public Key -> Stake (snapshot for legacy compat)
 	Transactions       []Transaction
 	PrevHash           []byte
 	Hash               []byte
-	CommitStoreHash []byte
+	CommitStoreHash  []byte
 	StakeMapHash     []byte
 	UnstakeQueueHash []byte
 	DRGSeed          float64
 }
 
 
-func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
+func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte,
+	transactions []Transaction, prevHash []byte,
+	stakeMapHash []byte, unstakeQueueHash []byte, stakeData map[string]uint64,
+	privateKey *ecdsa.PrivateKey) *Block {
+
 	block := &Block{
 		Index:             index,
 		Timestamp:         time.Now().Unix(),
@@ -43,34 +46,23 @@ func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte
 		BalanceLedgerHash: balanceLedgerHash,
 		Transactions:      transactions,
 		PrevHash:          prevHash,
+		StakeMapHash:      stakeMapHash,
+		UnstakeQueueHash:  unstakeQueueHash,
+		StakeData:         stakeData,
 	}
 
 	block.MerkleRootHash = block.SetupMerkleTree()
-	block.StakeData = block.SetupStakeData(prevStakeData)
 	block.Signature = block.SignBlock(privateKey)
 	block.Hash = block.ComputeHash()
 
 	return block
 }
 
-func (b *Block) SetupStakeData(prevStakeData map[string]int) map[string]int {
-	stakeData := make(map[string]int)
-	// Copy previous stake data
-	for key, value := range prevStakeData {
-		stakeData[key] = value
-	}
-
-	// Update stake data based on transactions
-	for _, tx := range b.Transactions {
-		if tx.Type == REGISTER {
-			stakeData[hex.EncodeToString(tx.OwnerKey)]++ // Increase stake for new domain registration
-		} else if tx.Type == REVOKE {
-			stakeData[hex.EncodeToString(tx.OwnerKey)]-- // Decrease stake for revoked domain
-		}
-	}
-
-	return stakeData
+// GetStakeSnapshot returns the current staked balances from sm as a plain map.
+func (b *Block) GetStakeSnapshot(sm StakeStorer) map[string]uint64 {
+	return sm.GetAll()
 }
+
 
 func (b *Block) SignBlock(privateKey *ecdsa.PrivateKey) []byte {
 	blockData := b.SerializeForSigning()
@@ -120,39 +112,19 @@ func (b *Block) VerifyBlock(publicKeyBytes []byte) bool {
 	return ecdsa.Verify(publicKey, hash[:], r, s)
 }
 
-func (b *Block) GetStakeDataBytes() []byte {
-	// Extract keys from the map
-	keys := make([]string, 0, len(b.StakeData))
-	for key := range b.StakeData {
-		keys = append(keys, key)
-	}
 
-	sort.Strings(keys) // Sort keys to ensure deterministic order
-
-	stakeDataBytes := []byte{}
-	for _, key := range keys {
-		value := b.StakeData[key]
-		decodedKey, _ := hex.DecodeString(key)
-		stakeDataBytes = append(stakeDataBytes, decodedKey...)
-		stakeDataBytes = append(stakeDataBytes, IntToByteArr(int64(value))...)
-	}
-
-	return stakeDataBytes
-}
-
-// Same as ComputeHash, but ommits Signature field
+// Same as ComputeHash, but omits the Signature field
 func (b *Block) SerializeForSigning() []byte {
-	stakeDataBytes := b.GetStakeDataBytes()
-
 	data := bytes.Join(
 		[][]byte{
 			IntToByteArr(b.Index),
 			IntToByteArr(b.Timestamp),
-			IntToByteArr(b.SlotNumber), // Include SlotNumber
+			IntToByteArr(b.SlotNumber),
 			b.SlotLeader,
 			b.IndexHash,
 			b.MerkleRootHash,
-			stakeDataBytes,
+			b.StakeMapHash,
+			b.UnstakeQueueHash,
 			b.PrevHash,
 		},
 		[]byte{},
@@ -162,30 +134,32 @@ func (b *Block) SerializeForSigning() []byte {
 	return hash[:]
 }
 
+
 func NewGenesisBlock(slotLeader []byte, privateKey *ecdsa.PrivateKey, registryKeys [][]byte, randomness []byte) *Block {
-	stakeData := make(map[string]int)
 	n := len(registryKeys)
 	if n == 0 {
 		log.Panic("No registries provided for genesis block")
 	}
 
-	// Initialize stakes to zero
+	stakeData := make(map[string]uint64, n)
 	for _, key := range registryKeys {
 		stakeData[hex.EncodeToString(key)] = 0
 	}
 
 	genesisBlock := Block{
-		Index:          0,
-		Timestamp:      time.Now().Unix(),
-		SlotNumber:     0,
-		SlotLeader:     slotLeader,
-		Signature:      []byte{},
-		IndexHash:      []byte{},
-		MerkleRootHash: []byte{},
-		StakeData:      stakeData,
-		Transactions:   []Transaction{},
-		PrevHash:       randomness, // Storing randomness in PrevHash field
-		Hash:           []byte{},
+		Index:            0,
+		Timestamp:        time.Now().Unix(),
+		SlotNumber:       0,
+		SlotLeader:       slotLeader,
+		Signature:        []byte{},
+		IndexHash:        []byte{},
+		MerkleRootHash:   []byte{},
+		StakeData:        stakeData,
+		Transactions:     []Transaction{},
+		PrevHash:         randomness, // Storing randomness in PrevHash field
+		Hash:             []byte{},
+		StakeMapHash:     NewStakeMap().Hash(),
+		UnstakeQueueHash: NewUnstakeQueue().Hash(),
 	}
 
 	genesisBlock.Signature = genesisBlock.SignBlock(privateKey)
@@ -195,8 +169,6 @@ func NewGenesisBlock(slotLeader []byte, privateKey *ecdsa.PrivateKey, registryKe
 }
 
 func (b *Block) ComputeHash() []byte {
-	stakeDataBytes := b.GetStakeDataBytes()
-
 	data := bytes.Join(
 		[][]byte{
 			IntToByteArr(b.Index),
@@ -207,7 +179,8 @@ func (b *Block) ComputeHash() []byte {
 			b.IndexHash,
 			b.BalanceLedgerHash,
 			b.MerkleRootHash,
-			stakeDataBytes,
+			b.StakeMapHash,
+			b.UnstakeQueueHash,
 			b.PrevHash,
 		},
 		[]byte{},
@@ -289,39 +262,47 @@ func ValidateGenesisBlock(block *Block, registryKeys [][]byte, slotLeaderKey []b
 
 func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	ledger *BalanceLedger, im DomainIndexer, expiryChecker ExpiryChecker,
-	slotsPerDay int64) (*BalanceLedger, bool) {
+	slotsPerDay int64, stakeMap StakeStorer, unstakeQueue *UnstakeQueue,
+	slashedEvidence map[string]bool) (*BalanceLedger, StakeStorer, *UnstakeQueue, map[string]bool, bool) {
 
 	if oldBlock.Index+1 != newBlock.Index {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if newBlock.SlotNumber <= oldBlock.SlotNumber {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(oldBlock.Hash, newBlock.PrevHash) {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.SlotLeader, slotLeaderKey) {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if !newBlock.VerifyBlock(slotLeaderKey) {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.MerkleRootHash, newBlock.SetupMerkleTree()) {
-		return nil, false
-	}
-
-	if !areStakesEqual(newBlock.StakeData, newBlock.SetupStakeData(oldBlock.StakeData)) {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.Hash, newBlock.ComputeHash()) {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
+
+	// Staging clones — mutations stay isolated until the block is accepted
+	stagingStake := stakeMap.Clone()
+	stagingQueue := unstakeQueue.Clone()
+	stagingSlashed := make(map[string]bool, len(slashedEvidence))
+	for k, v := range slashedEvidence {
+		stagingSlashed[k] = v
+	}
+
+	// Mature any queued unstakes before processing this block's transactions
+	stagingQueue.SweepMature(uint64(newBlock.SlotNumber))
 
 	// Purge-slot revocation check
 	if expiryChecker != nil {
@@ -350,7 +331,7 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 			}
 			if !found {
 				log.Println("Block missing required purge:", expected.DomainName, "TID:", expected.TID)
-				return nil, false
+				return nil, nil, nil, nil, false
 			}
 		}
 	}
@@ -359,7 +340,7 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	if !ValidateTransactions(newBlock.Transactions, ledger, im,
 		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader) {
 		log.Printf("ValidateBlock: ValidateTransactions failed — block rejected")
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	// nonce + fee on staging clone
@@ -376,7 +357,7 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	}
 	if !bytes.Equal(newBlock.BalanceLedgerHash, staging.Hash()) {
 		log.Printf("ValidateBlock: BalanceLedgerHash mismatch — block rejected")
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	// domain mutations on overlay
@@ -385,13 +366,23 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	}
 	if !bytes.Equal(newBlock.IndexHash, im.GetIndexHash()) {
 		log.Printf("ValidateBlock: IndexHash mismatch — block rejected")
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
-	// commit overlay to real state
+	// Verify stake hashes match the staging state after all mutations
+	if !bytes.Equal(newBlock.StakeMapHash, stagingStake.Hash()) {
+		log.Printf("ValidateBlock: StakeMapHash mismatch — block rejected")
+		return nil, nil, nil, nil, false
+	}
+	if !bytes.Equal(newBlock.UnstakeQueueHash, stagingQueue.Hash()) {
+		log.Printf("ValidateBlock: UnstakeQueueHash mismatch — block rejected")
+		return nil, nil, nil, nil, false
+	}
+
+	// commit domain overlay to real state
 	im.Commit()
 
-	return staging, true
+	return staging, stagingStake, stagingQueue, stagingSlashed, true
 }
 
 // ValidateTransactions implements the 3-gate validation model.

@@ -97,8 +97,8 @@ func (sm *StakeMap) Hash() []byte {
 	return h.Sum(nil)
 }
 
-// Clone returns a deep copy of the StakeMap.
-func (sm *StakeMap) Clone() *StakeMap {
+// Clone returns a deep copy of the StakeMap as a StakeStorer.
+func (sm *StakeMap) Clone() StakeStorer {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	clone := NewStakeMap()
