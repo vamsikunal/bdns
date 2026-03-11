@@ -10,6 +10,12 @@ var TrustedRegistries [][]byte
 // GracePeriodDays is the number of days (slot) a domain stays in the grace period 
 const GracePeriodDays int64 = 30
 
+// CommitMinDelay is the minimum number of blocks between COMMIT and REVEAL.
+const CommitMinDelay int64 = 3
+
+// CommitMaxWindow is the maximum number of blocks a COMMIT remains valid.
+const CommitMaxWindow int64 = 100
+
 // InitTrustedRegistries initializes the trusted registry keys
 func InitTrustedRegistries(registryKeys [][]byte) {
 	TrustedRegistries = make([][]byte, len(registryKeys))
