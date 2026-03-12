@@ -265,6 +265,37 @@ func NewStakeTransaction(amount uint64,
 	return &tx
 }
 
+// NewCommitTransaction creates a COMMIT transaction with a blind hash.
+func NewCommitTransaction(domainName string, salt []byte,
+	ownerKey []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	// Compute length-prefixed blind hash to prevent injection attacks
+	commitData := make([]byte, 0, 24+len(domainName)+len(salt)+len(ownerKey))
+	commitData = append(commitData, IntToByteArr(int64(len(domainName)))...)
+	commitData = append(commitData, []byte(domainName)...)
+	commitData = append(commitData, IntToByteArr(int64(len(salt)))...)
+	commitData = append(commitData, salt...)
+	commitData = append(commitData, IntToByteArr(int64(len(ownerKey)))...)
+	commitData = append(commitData, ownerKey...)
+	hash := sha256.Sum256(commitData)
+
+	tx := Transaction{
+		TID:        GenerateRandomTxID(txPool),
+		Type:       COMMIT,
+		Timestamp:  time.Now().Unix(),
+		DomainName: "", // MUST be blank
+		Records:    nil,
+		CommitHash: hash[:],
+		OwnerKey:   ownerKey,
+		Fee:        fee,
+		Nonce:      nonce,
+		Signature:  nil,
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
 // NewUnstakeTransaction creates an UNSTAKE transaction that queues B-Coins for
 // return to the sender's liquid balance after the unbonding delay elapses.
 func NewUnstakeTransaction(amount uint64,
@@ -303,6 +334,34 @@ func NewEquivocationProofTransaction(blockA *Block, blockB *Block,
 		Nonce:       nonce,
 		EquivBlockA: blockA.Serialize(),
 		EquivBlockB: blockB.Serialize(),
+	}
+	tx.Signature = SignTransaction(privateKey, &tx)
+	return &tx
+}
+
+// NewRevealTransaction creates a REVEAL transaction referencing a prior COMMIT.
+func NewRevealTransaction(domainName string, salt []byte, records []Record,
+	cacheTTL int64, currentSlot int64, slotsPerDay int64, commitTID int,
+	ownerKey []byte, recipient []byte, privateKey *ecdsa.PrivateKey,
+	fee uint64, nonce uint64, txPool map[int]*Transaction) *Transaction {
+
+	SortRecords(records)
+
+	tx := Transaction{
+		TID:         GenerateRandomTxID(txPool),
+		Type:        REVEAL,
+		Timestamp:   time.Now().Unix(),
+		DomainName:  domainName,
+		Records:     records,
+		CacheTTL:    cacheTTL,
+		ExpirySlot:  currentSlot + (365 * slotsPerDay), // 1 year validity
+		RedeemsTxID: commitTID,                         // References COMMIT TID
+		Salt:        salt,
+		OwnerKey:    ownerKey,
+		Recipient:   recipient, // End-user domain owner
+		Fee:         fee,
+		Nonce:       nonce,
+		Signature:   nil,
 	}
 	tx.Signature = SignTransaction(privateKey, &tx)
 	return &tx
@@ -395,7 +454,21 @@ func VerifyTransaction(publicKeyBytes []byte, tx *Transaction, currentSlot int64
 	case LIST, BUY, TRANSFER, DELIST, FUND:
 		return VerifySignature(publicKeyBytes, tx)
 
-	case COMMIT, REVEAL, STAKE, UNSTAKE, EQUIVOCATION_PROOF:
+	case COMMIT:
+		if !IsRegistryKey(tx.OwnerKey) {
+			log.Println("COMMIT not signed by trusted registry")
+			return false
+		}
+		return VerifySignature(tx.OwnerKey, tx)
+
+	case REVEAL:
+		if !IsRegistryKey(tx.OwnerKey) {
+			log.Println("REVEAL not signed by trusted registry")
+			return false
+		}
+		return VerifySignature(tx.OwnerKey, tx)
+
+	case STAKE, UNSTAKE, EQUIVOCATION_PROOF:
 		return VerifySignature(tx.OwnerKey, tx)
 	}
 
