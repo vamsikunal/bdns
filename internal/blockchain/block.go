@@ -338,7 +338,8 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 
 	// 3-gate re-check: malicious leader may bypass mempool
 	if !ValidateTransactions(newBlock.Transactions, ledger, im,
-		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader) {
+		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader,
+		stakeMap, unstakeQueue, slashedEvidence) {
 		log.Printf("ValidateBlock: ValidateTransactions failed — block rejected")
 		return nil, nil, nil, nil, false
 	}
@@ -391,7 +392,8 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 // Gate 3: Nonce sequential equality
 func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainIndexer,
 	currentSlot int64, slotsPerDay int64,
-	isBlockValidation bool, slotLeader []byte) bool {
+	isBlockValidation bool, slotLeader []byte,
+	stakeMap StakeStorer, unstakeQueue *UnstakeQueue, slashedEvidence map[string]bool) bool {
 
 	shadowNonce := make(map[string]uint64)
 	shadowBalance := make(map[string]uint64)
@@ -400,12 +402,53 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 	shadowRegistered := make(map[string]bool)
 	shadowOwner := make(map[string]string)
 	shadowTx := make(map[int]*Transaction)
+	shadowStake := make(map[string]uint64)        // intra-block stake mutations
+	shadowPendingStake := make(map[string]uint64) // UNSTAKE coins queued this block
+	shadowQueueBurn := make(map[string]uint64)    // queue burns from equivocation this block
+	_ = shadowStake
+	_ = shadowPendingStake
+	_ = shadowQueueBurn
 
 	for _, tx := range txs {
 		// Gate 1: Signature verification
 		if len(tx.OwnerKey) > 0 {
 			if !VerifySignature(tx.OwnerKey, &tx) {
 				log.Printf("ValidateTransactions: invalid signature for domain %s", tx.DomainName)
+				return false
+			}
+		}
+
+		// Gate 1.5p: PoS field hygiene
+		switch tx.Type {
+		case STAKE, UNSTAKE:
+			if tx.DomainName != "" || len(tx.Records) > 0 || tx.RedeemsTxID != 0 || len(tx.Recipient) > 0 {
+				log.Printf("ValidateTransactions: %d rejected — legacy fields must be empty", tx.Type)
+				return false
+			}
+			if len(tx.EquivBlockA) > 0 || len(tx.EquivBlockB) > 0 {
+				log.Printf("ValidateTransactions: %d rejected — equivocation fields must be empty", tx.Type)
+				return false
+			}
+		case EQUIVOCATION_PROOF:
+			if tx.DomainName != "" || len(tx.Records) > 0 || tx.RedeemsTxID != 0 || len(tx.Recipient) > 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — legacy fields must be empty")
+				return false
+			}
+			if tx.StakeAmount != 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — StakeAmount must be 0")
+				return false
+			}
+		}
+
+		// Gate 1.5q: Inverse hygiene — legacy types must not carry PoS fields
+		switch tx.Type {
+		case REGISTER, UPDATE, REVOKE, RENEW, LIST, BUY, TRANSFER, DELIST, FUND, COMMIT, REVEAL:
+			if tx.StakeAmount != 0 {
+				log.Printf("ValidateTransactions: %d rejected — StakeAmount must be 0", tx.Type)
+				return false
+			}
+			if len(tx.EquivBlockA) > 0 || len(tx.EquivBlockB) > 0 {
+				log.Printf("ValidateTransactions: %d rejected — equivocation fields must be empty", tx.Type)
 				return false
 			}
 		}
