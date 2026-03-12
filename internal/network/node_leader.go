@@ -31,7 +31,12 @@ func (n *Node) GetSlotLeader(epoch int64) []byte {
 		latestBlock := n.Blockchain.GetLatestBlock()
 		n.BcMutex.Unlock()
 
-		slotLeader = consensus.GetSlotLeaderUtil(n.RegistryKeys, latestBlock.StakeData, n.EpochRandoms[epoch])
+		// Convert StakeData from uint64 map to int map for consensus compatibility
+		stakeInt := make(map[string]int, len(latestBlock.StakeData))
+		for k, v := range latestBlock.StakeData {
+			stakeInt[k] = int(v)
+		}
+		slotLeader = consensus.GetSlotLeaderUtil(n.RegistryKeys, stakeInt, n.EpochRandoms[epoch])
 	}
 
 	n.SlotLeaders[epoch] = slotLeader
@@ -147,8 +152,8 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 
 		// Seal block
 		newBlock := blockchain.NewBlock(latestBlock.Index+1, slot, currSlotLeader,
-			indexHash, balanceLedgerHash, transactions, latestBlock.Hash,
-			latestBlock.StakeData, &n.KeyPair.PrivateKey)
+			indexHash, balanceLedgerHash, nil, transactions, latestBlock.Hash,
+			nil, nil, latestBlock.StakeData, &n.KeyPair.PrivateKey)
 
 		// Phase C: commit overlay to real state
 		n.BalanceLedger = staging

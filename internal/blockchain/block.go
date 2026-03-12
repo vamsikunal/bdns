@@ -33,7 +33,7 @@ type Block struct {
 
 
 func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte,
-	transactions []Transaction, prevHash []byte,
+	commitStoreHash []byte, transactions []Transaction, prevHash []byte,
 	stakeMapHash []byte, unstakeQueueHash []byte, stakeData map[string]uint64,
 	privateKey *ecdsa.PrivateKey) *Block {
 
@@ -44,6 +44,7 @@ func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte
 		SlotLeader:        slotLeader,
 		IndexHash:         indexHash,
 		BalanceLedgerHash: balanceLedgerHash,
+		CommitStoreHash:   commitStoreHash,
 		Transactions:      transactions,
 		PrevHash:          prevHash,
 		StakeMapHash:      stakeMapHash,
@@ -178,6 +179,7 @@ func (b *Block) ComputeHash() []byte {
 			b.Signature,
 			b.IndexHash,
 			b.BalanceLedgerHash,
+			b.CommitStoreHash,
 			b.MerkleRootHash,
 			b.StakeMapHash,
 			b.UnstakeQueueHash,
@@ -337,8 +339,8 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	}
 
 	// 3-gate re-check: malicious leader may bypass mempool
-	if !ValidateTransactions(newBlock.Transactions, ledger, im,
-		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader) {
+	if !ValidateTransactions(newBlock.Transactions, ledger, im, nil,
+		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader, newBlock.Index) {
 		log.Printf("ValidateBlock: ValidateTransactions failed — block rejected")
 		return nil, nil, nil, nil, false
 	}
@@ -389,9 +391,9 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 // Gate 1: Signature + spent check + structural guards
 // Gate 2: Balance sufficiency (running shadow balance)
 // Gate 3: Nonce sequential equality
-func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainIndexer,
+func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainIndexer, cs CommitStorer,
 	currentSlot int64, slotsPerDay int64,
-	isBlockValidation bool, slotLeader []byte) bool {
+	isBlockValidation bool, slotLeader []byte, blockIndex int64) bool {
 
 	shadowNonce := make(map[string]uint64)
 	shadowBalance := make(map[string]uint64)
@@ -400,6 +402,7 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 	shadowRegistered := make(map[string]bool)
 	shadowOwner := make(map[string]string)
 	shadowTx := make(map[int]*Transaction)
+	shadowCommit := make(map[string]bool) // tracks commits consumed within this block
 
 	for _, tx := range txs {
 		// Gate 1: Signature verification
@@ -410,8 +413,26 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			}
 		}
 
-		// Gate 1.5: RedeemsTxID double-spend check
-		if tx.RedeemsTxID != 0 && (tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE) {
+		// Gate 1.5r: REGISTER is deprecated — use COMMIT→REVEAL
+		if tx.Type == REGISTER {
+			log.Printf("ValidateTransactions: gate 1.5r — REGISTER rejected (use COMMIT→REVEAL), TID=%d", tx.TID)
+			return false
+		}
+
+		// Gate 1.5s: CommitHash and Salt must be empty for non-COMMIT/REVEAL types
+		if tx.Type != COMMIT && tx.Type != REVEAL {
+			if len(tx.CommitHash) > 0 {
+				log.Printf("ValidateTransactions: gate 1.5s — CommitHash must be empty for type %d, TID=%d", tx.Type, tx.TID)
+				return false
+			}
+			if len(tx.Salt) > 0 {
+				log.Printf("ValidateTransactions: gate 1.5s — Salt must be empty for type %d, TID=%d", tx.Type, tx.TID)
+				return false
+			}
+		}
+
+		// Gate 1.5: RedeemsTxID double-spend check (REVEAL included for defense-in-depth)
+		if tx.RedeemsTxID != 0 && (tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE || tx.Type == REVEAL) {
 			if shadowSpent[tx.RedeemsTxID] {
 				log.Printf("ValidateTransactions: RedeemsTxID %d already spent in this block",
 					tx.RedeemsTxID)
@@ -423,8 +444,8 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 				return false
 			}
 
-			// Gate 1.5h: Domain-affinity check
-			if tx.Type != REGISTER {
+			// Gate 1.5h: Domain-affinity check (skip for REVEAL — COMMIT lives in CommitStore)
+			if tx.Type != REGISTER && tx.Type != REVEAL {
 				redeemsTx, inShadow := shadowTx[tx.RedeemsTxID]
 				if !inShadow {
 					redeemsTx = im.GetTxByID(tx.RedeemsTxID)
@@ -473,6 +494,44 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			return false
 		}
 
+		// Gate 1.5c-commit: COMMIT structural checks
+		if tx.Type == COMMIT {
+			if !IsRegistryKey(tx.OwnerKey) {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — not TrustedRegistry, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.CommitHash) != 32 {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — invalid CommitHash length %d, TID=%d", len(tx.CommitHash), tx.TID)
+				return false
+			}
+			if tx.DomainName != "" {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — DomainName must be blank, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.Records) > 0 {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — Records must be empty, TID=%d", tx.TID)
+				return false
+			}
+			if tx.RedeemsTxID != 0 {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — RedeemsTxID must be 0, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.Salt) > 0 {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — Salt must be blank, TID=%d", tx.TID)
+				return false
+			}
+			commitHex := hex.EncodeToString(tx.CommitHash)
+			if shadowCommit[commitHex] {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — duplicate hash in block, TID=%d", tx.TID)
+				return false
+			}
+			if cs != nil && cs.GetCommit(commitHex) != nil {
+				log.Printf("ValidateTransactions: gate 1.5c-commit — hash already pending, TID=%d", tx.TID)
+				return false
+			}
+			shadowCommit[commitHex] = true
+		}
+
 		// Gate 1.5e: Domain lifecycle phase check for secondary market ops
 		if tx.Type == LIST || tx.Type == DELIST || tx.Type == BUY || tx.Type == TRANSFER {
 			existingTx := im.GetDomain(tx.DomainName)
@@ -503,6 +562,11 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 				}
 				if !VerifySignature(slotLeader, &tx) {
 					log.Printf("ValidateTransactions: auto-REVOKE not signed by slot leader")
+					return false
+				}
+				// Defense: reject auto-REVOKE for domains registered in this block
+				if shadowRegistered[tx.DomainName] {
+					log.Printf("ValidateTransactions: auto-REVOKE rejected — %s registered in this block", tx.DomainName)
 					return false
 				}
 				continue
@@ -758,6 +822,81 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			shadowOwner[tx.DomainName] = pubKeyHex
 		}
 
+		// REVEAL: 7-gate pipeline
+		if tx.Type == REVEAL {
+			if !IsRegistryKey(tx.OwnerKey) {
+				log.Printf("ValidateTransactions: REVEAL rejected — not TrustedRegistry, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.CommitHash) > 0 {
+				log.Printf("ValidateTransactions: REVEAL rejected — CommitHash must be empty, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.Recipient) == 0 {
+				log.Printf("ValidateTransactions: REVEAL rejected — Recipient required, TID=%d", tx.TID)
+				return false
+			}
+			// Recompute hash using length-prefixed fields
+			revealData := make([]byte, 0, 24+len(tx.DomainName)+len(tx.Salt)+len(tx.OwnerKey))
+			revealData = append(revealData, IntToByteArr(int64(len(tx.DomainName)))...)
+			revealData = append(revealData, []byte(tx.DomainName)...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.Salt)))...)
+			revealData = append(revealData, tx.Salt...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.OwnerKey)))...)
+			revealData = append(revealData, tx.OwnerKey...)
+			recomputedHash := sha256.Sum256(revealData)
+			commitHex := hex.EncodeToString(recomputedHash[:])
+			// Gate R1: hash match
+			var commitRecord *CommitRecord
+			if cs != nil {
+				commitRecord = cs.GetCommit(commitHex)
+			}
+			if commitRecord == nil || shadowCommit[commitHex] {
+				log.Printf("ValidateTransactions: REVEAL gate R1 — no pending COMMIT for hash %s, TID=%d", commitHex[:16], tx.TID)
+				return false
+			}
+			// Gate R1b: TID binding
+			if tx.RedeemsTxID != commitRecord.CommitTID {
+				log.Printf("ValidateTransactions: REVEAL gate R1b — TID mismatch, TID=%d", tx.TID)
+				return false
+			}
+			// Gate R2: PubKey binding
+			if !bytes.Equal(tx.OwnerKey, commitRecord.CommitterPK) {
+				log.Printf("ValidateTransactions: REVEAL gate R2 — PubKey mismatch, TID=%d", tx.TID)
+				return false
+			}
+			// Gate R3: minimum delay
+			blocksSinceCommit := blockIndex - commitRecord.CommitBlock
+			if blocksSinceCommit < CommitMinDelay {
+				log.Printf("ValidateTransactions: REVEAL gate R3 — premature (%d blocks, need %d), TID=%d", blocksSinceCommit, CommitMinDelay, tx.TID)
+				return false
+			}
+			// Gate R4: domain availability
+			if shadowRegistered[tx.DomainName] {
+				log.Printf("ValidateTransactions: REVEAL gate R4 — domain %s already registered in block, TID=%d", tx.DomainName, tx.TID)
+				return false
+			}
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx != nil {
+				phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+				if phase != "purged" {
+					log.Printf("ValidateTransactions: REVEAL gate R4 — domain %s in %s phase, TID=%d", tx.DomainName, phase, tx.TID)
+					return false
+				}
+				// Gate R4b: COMMIT must post-date purge
+				purgeSlot := ComputePurgeSlot(existingTx.ExpirySlot, slotsPerDay)
+				if commitRecord.CommitSlot < purgeSlot {
+					log.Printf("ValidateTransactions: REVEAL gate R4b — COMMIT predates purge, TID=%d", tx.TID)
+					return false
+				}
+			}
+			// All gates passed — mark consumed
+			shadowCommit[commitHex] = true
+			shadowRegistered[tx.DomainName] = true
+			// Shadow owner is the Recipient (end-user), not the Registry
+			shadowOwner[tx.DomainName] = hex.EncodeToString(tx.Recipient)
+		}
+
 		// TRANSFER: ownership check + shadow update
 		if tx.Type == TRANSFER {
 			currentOwner := ""
@@ -785,8 +924,9 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 		shadowNonce[pubKeyHex] = currentNonce + 1
 		shadowBalance[pubKeyHex] = runningBalance
 
-		// Populate shadowTx for state-mutating ops (same-block provenance chaining)
-		if tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE {
+		// Populate shadowTx for state-mutating ops
+		if tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE ||
+			tx.Type == COMMIT || tx.Type == REVEAL {
 			txCopy := tx
 			shadowTx[tx.TID] = &txCopy
 		}
