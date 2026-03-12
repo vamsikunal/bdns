@@ -19,16 +19,21 @@ const (
 )
 
 // ComputeSlashAmount returns the amount to slash given a total stake and percent.
-// Guards against overflow when stake * percent would exceed uint64.
 func ComputeSlashAmount(stake, percent uint64) uint64 {
 	if percent == 0 {
 		return 0
 	}
 	if stake > ^uint64(0)/percent {
-		return stake // saturate at full stake on overflow
+		return stake
 	}
 	return stake * percent / 100
 }
+
+// CommitMinDelay is the minimum number of blocks between COMMIT and REVEAL.
+const CommitMinDelay int64 = 3
+
+// CommitMaxWindow is the maximum number of blocks a COMMIT remains valid.
+const CommitMaxWindow int64 = 100
 
 
 // InitTrustedRegistries initializes the trusted registry keys

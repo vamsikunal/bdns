@@ -34,3 +34,12 @@ type StakeStorer interface {
 	Clone() StakeStorer
 }
 
+// CommitStorer abstracts the pending commits store for validation.
+type CommitStorer interface {
+	AddCommit(record *CommitRecord)
+	GetCommit(commitHashHex string) *CommitRecord
+	ConsumeCommit(commitHashHex string)
+	PurgeExpired(currentBlockIndex int64) int
+	Hash() []byte
+}
+
