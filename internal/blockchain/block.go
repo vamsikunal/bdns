@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"math/big"
 	"time"
@@ -405,9 +406,7 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 	shadowStake := make(map[string]uint64)        // intra-block stake mutations
 	shadowPendingStake := make(map[string]uint64) // UNSTAKE coins queued this block
 	shadowQueueBurn := make(map[string]uint64)    // queue burns from equivocation this block
-	_ = shadowStake
-	_ = shadowPendingStake
-	_ = shadowQueueBurn
+	slashedEquivocations := make(map[string]bool) // offense keys seen this block
 
 	for _, tx := range txs {
 		// Gate 1: Signature verification
@@ -822,6 +821,123 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 		}
 		if tx.Type == BUY {
 			shadowOwner[tx.DomainName] = pubKeyHex
+		}
+
+		// Gate 3.5: STAKE validation
+		if tx.Type == STAKE {
+			if tx.StakeAmount == 0 {
+				log.Printf("ValidateTransactions: STAKE rejected — StakeAmount must be > 0")
+				return false
+			}
+			currentStake := stakeMap.GetStake(pubKeyHex)
+			if s, ok := shadowStake[pubKeyHex]; ok {
+				currentStake = s
+			}
+			if currentStake == 0 && tx.StakeAmount < MinStakeThreshold {
+				log.Printf("ValidateTransactions: STAKE rejected — first stake %d below minimum %d",
+					tx.StakeAmount, MinStakeThreshold)
+				return false
+			}
+			if tx.Fee+tx.StakeAmount < tx.Fee {
+				log.Printf("ValidateTransactions: STAKE rejected — fee + StakeAmount overflows uint64")
+				return false
+			}
+			if runningBalance < tx.StakeAmount {
+				log.Printf("ValidateTransactions: STAKE rejected — %s has %d after fee, needs %d",
+					pubKeyHex[:8], runningBalance, tx.StakeAmount)
+				return false
+			}
+			runningBalance -= tx.StakeAmount
+			shadowStake[pubKeyHex] = currentStake + tx.StakeAmount
+		}
+
+		// Gate 3.5: UNSTAKE validation
+		if tx.Type == UNSTAKE {
+			if tx.StakeAmount == 0 {
+				log.Printf("ValidateTransactions: UNSTAKE rejected — StakeAmount must be > 0")
+				return false
+			}
+			currentStake := stakeMap.GetStake(pubKeyHex)
+			if s, ok := shadowStake[pubKeyHex]; ok {
+				currentStake = s
+			}
+			if currentStake < tx.StakeAmount {
+				log.Printf("ValidateTransactions: UNSTAKE rejected — stake %d < requested %d",
+					currentStake, tx.StakeAmount)
+				return false
+			}
+			remaining := currentStake - tx.StakeAmount
+			if remaining > 0 && remaining < MinStakeThreshold {
+				log.Printf("ValidateTransactions: UNSTAKE rejected — remaining stake %d below minimum %d",
+					remaining, MinStakeThreshold)
+				return false
+			}
+			shadowStake[pubKeyHex] = remaining
+			shadowPendingStake[pubKeyHex] += tx.StakeAmount
+		}
+
+		// Gate 3.5: EQUIVOCATION_PROOF validation
+		if tx.Type == EQUIVOCATION_PROOF {
+			if len(tx.EquivBlockA) == 0 || len(tx.EquivBlockB) == 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — missing evidence")
+				return false
+			}
+			if len(tx.EquivBlockA) > MaxEvidenceBlockBytes || len(tx.EquivBlockB) > MaxEvidenceBlockBytes {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — evidence exceeds size limit")
+				return false
+			}
+			blockA := DeserializeBlock(tx.EquivBlockA)
+			blockB := DeserializeBlock(tx.EquivBlockB)
+			if blockA == nil || blockB == nil {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — cannot deserialize evidence")
+				return false
+			}
+			offenderHex := hex.EncodeToString(blockA.SlotLeader)
+			if blockA.Index != blockB.Index {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — blocks at different heights")
+				return false
+			}
+			if offenderHex != hex.EncodeToString(blockB.SlotLeader) {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — different slot leaders")
+				return false
+			}
+			if bytes.Equal(blockA.Hash, blockB.Hash) {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — identical block hashes")
+				return false
+			}
+			if !blockA.VerifyBlock(blockA.SlotLeader) || !blockB.VerifyBlock(blockB.SlotLeader) {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — invalid block signature")
+				return false
+			}
+			offenseKey := fmt.Sprintf("%d:%s", blockA.Index, offenderHex)
+			if slashedEvidence[offenseKey] || slashedEquivocations[offenseKey] {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — offense already recorded")
+				return false
+			}
+			stakePart := stakeMap.GetStake(offenderHex)
+			if s, ok := shadowStake[offenderHex]; ok {
+				stakePart = s
+			}
+			queuePart := unstakeQueue.GetPendingStake(offenderHex) + shadowPendingStake[offenderHex] - shadowQueueBurn[offenderHex]
+			totalSlashable := stakePart + queuePart
+			if totalSlashable == 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — no slashable stake")
+				return false
+			}
+			slashAmount := ComputeSlashAmount(totalSlashable, SlashingPercent)
+			if slashAmount <= stakePart {
+				shadowStake[offenderHex] = stakePart - slashAmount
+			} else {
+				shadowStake[offenderHex] = 0
+				excess := slashAmount - stakePart
+				shadowQueueBurn[offenderHex] += excess
+				if shadowPendingStake[offenderHex] > excess {
+					shadowPendingStake[offenderHex] -= excess
+				} else {
+					shadowPendingStake[offenderHex] = 0
+				}
+			}
+			slashedEquivocations[offenseKey] = true
 		}
 
 		// Update running shadow state
