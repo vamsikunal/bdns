@@ -98,9 +98,15 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 
 		transactions := n.ChooseTxFromPool(blockTxLimit)
 
+		// Create CommitOverlay from the live store and purge expired commits
+		nextIdx := n.Blockchain.GetLatestBlock().Index + 1
+		commitOverlay := blockchain.NewCommitOverlay(n.CommitStore.ExportPending(), nextIdx)
+		commitOverlay.PurgeExpired(nextIdx)
+
 		// Add auto-revocation transactions for expired domains
+		// Prepend so COMMIT/REVEAL txs are processed before auto-REVOKE in same block
 		autoRevocations := n.GenerateAutoRevocations(slot, transactions)
-		transactions = append(transactions, autoRevocations...)
+		transactions = append(autoRevocations, transactions...)
 
 		if len(transactions) == 0 {
 			fmt.Println("No transactions to add. Skipping block creation.")
@@ -140,25 +146,27 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 			staging.Credit(hex.EncodeToString(n.KeyPair.PublicKey), totalFees)
 		}
 
-		// Phase B: domain mutations on overlay
+		// Phase B: domain mutations on overlay (pass CommitOverlay for COMMIT/REVEAL)
 		nextBlockIndex := latestBlock.Index + 1
 		imOverlay := index.NewIndexOverlay(n.IndexManager)
 		for i, tx := range transactions {
-			blockchain.ApplyDomainMutations(tx, staging, imOverlay, nil, slot, nextBlockIndex, i, slotsPerDay)
+			blockchain.ApplyDomainMutations(tx, staging, imOverlay, commitOverlay, slot, nextBlockIndex, i, slotsPerDay)
 		}
 
 		balanceLedgerHash := staging.Hash()
 		indexHash := imOverlay.GetIndexHash()
+		commitStoreHash := commitOverlay.Hash()
 		n.TxMutex.Unlock()
 
 		// Seal block
 		newBlock := blockchain.NewBlock(latestBlock.Index+1, slot, currSlotLeader,
-			indexHash, balanceLedgerHash, nil, transactions, latestBlock.Hash,
+			indexHash, balanceLedgerHash, commitStoreHash, transactions, latestBlock.Hash,
 			nil, nil, latestBlock.StakeData, &n.KeyPair.PrivateKey)
 
-		// Phase C: commit overlay to real state
+		// Phase C: commit overlays to real state
 		n.BalanceLedger = staging
 		imOverlay.Commit()
+		commitOverlay.Commit(n.CommitStore)
 
 		// Persist block + BoltDB spent markers
 		n.BcMutex.Lock()

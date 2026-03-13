@@ -70,7 +70,12 @@ func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	slotsPerDay := int64(86400) / n.Config.SlotInterval
 
 	nextBlockIndex := n.Blockchain.GetLatestBlock().Index + 1
-	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager, nil,
+
+	// Clone and purge CommitStore for mempool validation snapshot
+	commitSnap := blockchain.NewCommitOverlay(n.CommitStore.ExportPending(), nextBlockIndex)
+	commitSnap.PurgeExpired(nextBlockIndex)
+
+	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager, commitSnap,
 		currentSlot, slotsPerDay, false, nil, nextBlockIndex) {
 		log.Printf("AddTransaction: rejected TID %d — validation failed", tx.TID)
 		return
