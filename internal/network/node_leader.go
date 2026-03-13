@@ -141,9 +141,10 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 		}
 
 		// Phase B: domain mutations on overlay
+		nextBlockIndex := latestBlock.Index + 1
 		imOverlay := index.NewIndexOverlay(n.IndexManager)
 		for i, tx := range transactions {
-			blockchain.ApplyDomainMutations(tx, staging, imOverlay, slot, i, slotsPerDay)
+			blockchain.ApplyDomainMutations(tx, staging, imOverlay, nil, slot, nextBlockIndex, i, slotsPerDay)
 		}
 
 		balanceLedgerHash := staging.Hash()

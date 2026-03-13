@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -30,8 +31,8 @@ func ApplyLedgerMutations(tx Transaction, ledger *BalanceLedger) {
 }
 
 // ApplyDomainMutations processes domain-state effects and the BUY price transfer.
-func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexer,
-	currentSlot int64, txIndex int, slotsPerDay int64) error {
+func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexer, cs CommitStorer,
+	currentSlot int64, blockIndex int64, txIndex int, slotsPerDay int64) error {
 
 	pubKeyHex := hex.EncodeToString(tx.OwnerKey)
 
@@ -49,6 +50,51 @@ func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexe
 		}
 		im.Add(tx.DomainName, &tx, currentSlot, txIndex, slotsPerDay)
 		im.SetOwner(tx.DomainName, tx.OwnerKey)
+
+	case COMMIT:
+		if cs != nil {
+			commitHex := hex.EncodeToString(tx.CommitHash)
+			cs.AddCommit(&CommitRecord{
+				CommitHash:  tx.CommitHash,
+				CommitterPK: tx.OwnerKey,
+				CommitBlock: blockIndex,
+				CommitSlot:  currentSlot,
+				CommitTID:   tx.TID,
+				ExpiryBlock: blockIndex + CommitMaxWindow,
+			})
+			log.Printf("[COMMIT] hash=%s.. stored at block %d", commitHex[:16], blockIndex)
+		}
+
+	case REVEAL:
+		if cs != nil {
+			// Recompute hash to get the key for consumption
+			revealData := make([]byte, 0, 24+len(tx.DomainName)+len(tx.Salt)+len(tx.OwnerKey))
+			revealData = append(revealData, IntToByteArr(int64(len(tx.DomainName)))...)
+			revealData = append(revealData, []byte(tx.DomainName)...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.Salt)))...)
+			revealData = append(revealData, tx.Salt...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.OwnerKey)))...)
+			revealData = append(revealData, tx.OwnerKey...)
+			recomputedHash := sha256.Sum256(revealData)
+			commitHex := hex.EncodeToString(recomputedHash[:])
+
+			commitRecord := cs.GetCommit(commitHex)
+			if commitRecord == nil {
+				return fmt.Errorf("REVEAL failed: no pending COMMIT for hash %s", commitHex[:16])
+			}
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx != nil {
+				phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+				if phase != "purged" {
+					return fmt.Errorf("REVEAL failed: domain %s exists in %s phase", tx.DomainName, phase)
+				}
+			}
+			im.Add(tx.DomainName, &tx, currentSlot, txIndex, slotsPerDay)
+			im.SetOwner(tx.DomainName, tx.Recipient) // end-user owns the domain
+			im.MarkAsSpent(tx.RedeemsTxID)
+			cs.ConsumeCommit(commitHex)
+			log.Printf("[REVEAL] domain=%s registered, COMMIT %s.. consumed", tx.DomainName, commitHex[:16])
+		}
 
 	case REVOKE:
 		if len(tx.OwnerKey) > 0 {
