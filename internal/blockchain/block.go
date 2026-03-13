@@ -364,7 +364,7 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 
 	// domain mutations on overlay
 	for i, tx := range newBlock.Transactions {
-		ApplyDomainMutations(tx, staging, im, newBlock.SlotNumber, i, slotsPerDay)
+		ApplyDomainMutations(tx, staging, im, nil, newBlock.SlotNumber, newBlock.Index, i, slotsPerDay)
 	}
 	if !bytes.Equal(newBlock.IndexHash, im.GetIndexHash()) {
 		log.Printf("ValidateBlock: IndexHash mismatch — block rejected")
@@ -402,7 +402,7 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 	shadowRegistered := make(map[string]bool)
 	shadowOwner := make(map[string]string)
 	shadowTx := make(map[int]*Transaction)
-	shadowCommit := make(map[string]bool) // tracks commits consumed within this block
+	shadowCommit := make(map[string]bool) 
 
 	for _, tx := range txs {
 		// Gate 1: Signature verification
@@ -415,18 +415,18 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 
 		// Gate 1.5r: REGISTER is deprecated — use COMMIT→REVEAL
 		if tx.Type == REGISTER {
-			log.Printf("ValidateTransactions: gate 1.5r — REGISTER rejected (use COMMIT→REVEAL), TID=%d", tx.TID)
+			log.Printf("REGISTER rejected (use COMMIT→REVEAL), TID=%d", tx.TID)
 			return false
 		}
 
 		// Gate 1.5s: CommitHash and Salt must be empty for non-COMMIT/REVEAL types
 		if tx.Type != COMMIT && tx.Type != REVEAL {
 			if len(tx.CommitHash) > 0 {
-				log.Printf("ValidateTransactions: gate 1.5s — CommitHash must be empty for type %d, TID=%d", tx.Type, tx.TID)
+				log.Printf("CommitHash must be empty for type %d, TID=%d", tx.Type, tx.TID)
 				return false
 			}
 			if len(tx.Salt) > 0 {
-				log.Printf("ValidateTransactions: gate 1.5s — Salt must be empty for type %d, TID=%d", tx.Type, tx.TID)
+				log.Printf("Salt must be empty for type %d, TID=%d", tx.Type, tx.TID)
 				return false
 			}
 		}
@@ -497,36 +497,36 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 		// Gate 1.5c-commit: COMMIT structural checks
 		if tx.Type == COMMIT {
 			if !IsRegistryKey(tx.OwnerKey) {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — not TrustedRegistry, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Not TrustedRegistry, TID=%d", tx.TID)
 				return false
 			}
 			if len(tx.CommitHash) != 32 {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — invalid CommitHash length %d, TID=%d", len(tx.CommitHash), tx.TID)
+				log.Printf("ValidateTransactions(Commit): Invalid CommitHash length %d, TID=%d", len(tx.CommitHash), tx.TID)
 				return false
 			}
 			if tx.DomainName != "" {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — DomainName must be blank, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): DomainName must be blank, TID=%d", tx.TID)
 				return false
 			}
 			if len(tx.Records) > 0 {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — Records must be empty, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Records must be empty, TID=%d", tx.TID)
 				return false
 			}
 			if tx.RedeemsTxID != 0 {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — RedeemsTxID must be 0, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): RedeemsTxID must be 0, TID=%d", tx.TID)
 				return false
 			}
 			if len(tx.Salt) > 0 {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — Salt must be blank, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Salt must be blank, TID=%d", tx.TID)
 				return false
 			}
 			commitHex := hex.EncodeToString(tx.CommitHash)
 			if shadowCommit[commitHex] {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — duplicate hash in block, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Duplicate hash in block, TID=%d", tx.TID)
 				return false
 			}
 			if cs != nil && cs.GetCommit(commitHex) != nil {
-				log.Printf("ValidateTransactions: gate 1.5c-commit — hash already pending, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Hash already pending, TID=%d", tx.TID)
 				return false
 			}
 			shadowCommit[commitHex] = true
