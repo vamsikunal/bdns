@@ -22,8 +22,9 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		}
 	} else {
 		imOverlay := index.NewIndexOverlay(n.IndexManager)
-		staging, ok := blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(),
-			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay)
+		staging, _, _, _, ok := blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(),
+			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay,
+			blockchain.NewStakeMap(), blockchain.NewUnstakeQueue(), nil)
 		if !ok {
 			log.Println("Invalid block received at", n.Address)
 			return
@@ -68,8 +69,14 @@ func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	currentSlot := (time.Now().Unix() - n.Config.InitialTimestamp) / n.Config.SlotInterval
 	slotsPerDay := int64(86400) / n.Config.SlotInterval
 
-	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager,
-		currentSlot, slotsPerDay, false, nil) {
+	nextBlockIndex := n.Blockchain.GetLatestBlock().Index + 1
+
+	// Clone and purge CommitStore for mempool validation snapshot
+	commitSnap := blockchain.NewCommitOverlay(n.CommitStore.ExportPending(), nextBlockIndex)
+	commitSnap.PurgeExpired(nextBlockIndex)
+
+	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager, commitSnap,
+		currentSlot, slotsPerDay, false, nil, nextBlockIndex) {
 		log.Printf("AddTransaction: rejected TID %d — validation failed", tx.TID)
 		return
 	}
