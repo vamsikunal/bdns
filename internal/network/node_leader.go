@@ -31,7 +31,12 @@ func (n *Node) GetSlotLeader(epoch int64) []byte {
 		latestBlock := n.Blockchain.GetLatestBlock()
 		n.BcMutex.Unlock()
 
-		slotLeader = consensus.GetSlotLeaderUtil(n.RegistryKeys, latestBlock.StakeData, n.EpochRandoms[epoch])
+		// Convert StakeData from uint64 map to int map for consensus compatibility
+		stakeInt := make(map[string]int, len(latestBlock.StakeData))
+		for k, v := range latestBlock.StakeData {
+			stakeInt[k] = int(v)
+		}
+		slotLeader = consensus.GetSlotLeaderUtil(n.RegistryKeys, stakeInt, n.EpochRandoms[epoch])
 	}
 
 	n.SlotLeaders[epoch] = slotLeader
@@ -93,9 +98,15 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 
 		transactions := n.ChooseTxFromPool(blockTxLimit)
 
+		// Create CommitOverlay from the live store and purge expired commits
+		nextIdx := n.Blockchain.GetLatestBlock().Index + 1
+		commitOverlay := blockchain.NewCommitOverlay(n.CommitStore.ExportPending(), nextIdx)
+		commitOverlay.PurgeExpired(nextIdx)
+
 		// Add auto-revocation transactions for expired domains
+		// Prepend so COMMIT/REVEAL txs are processed before auto-REVOKE in same block
 		autoRevocations := n.GenerateAutoRevocations(slot, transactions)
-		transactions = append(transactions, autoRevocations...)
+		transactions = append(autoRevocations, transactions...)
 
 		if len(transactions) == 0 {
 			fmt.Println("No transactions to add. Skipping block creation.")
@@ -135,24 +146,27 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 			staging.Credit(hex.EncodeToString(n.KeyPair.PublicKey), totalFees)
 		}
 
-		// Phase B: domain mutations on overlay
+		// Phase B: domain mutations on overlay (pass CommitOverlay for COMMIT/REVEAL)
+		nextBlockIndex := latestBlock.Index + 1
 		imOverlay := index.NewIndexOverlay(n.IndexManager)
 		for i, tx := range transactions {
-			blockchain.ApplyDomainMutations(tx, staging, imOverlay, slot, i, slotsPerDay)
+			blockchain.ApplyDomainMutations(tx, staging, imOverlay, commitOverlay, slot, nextBlockIndex, i, slotsPerDay)
 		}
 
 		balanceLedgerHash := staging.Hash()
 		indexHash := imOverlay.GetIndexHash()
+		commitStoreHash := commitOverlay.Hash()
 		n.TxMutex.Unlock()
 
 		// Seal block
 		newBlock := blockchain.NewBlock(latestBlock.Index+1, slot, currSlotLeader,
-			indexHash, balanceLedgerHash, transactions, latestBlock.Hash,
-			latestBlock.StakeData, &n.KeyPair.PrivateKey)
+			indexHash, balanceLedgerHash, commitStoreHash, transactions, latestBlock.Hash,
+			nil, nil, latestBlock.StakeData, &n.KeyPair.PrivateKey)
 
-		// Phase C: commit overlay to real state
+		// Phase C: commit overlays to real state
 		n.BalanceLedger = staging
 		imOverlay.Commit()
+		commitOverlay.Commit(n.CommitStore)
 
 		// Persist block + BoltDB spent markers
 		n.BcMutex.Lock()
