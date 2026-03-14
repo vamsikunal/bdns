@@ -27,9 +27,59 @@ func ApplyLedgerMutations(tx Transaction, ledger *BalanceLedger) {
 			ledger.Credit(recipientHex, tx.ListPrice)
 		}
 	}
+
+	// Move coins from liquid balance into staked balance
+	if tx.Type == STAKE && tx.StakeAmount > 0 {
+		if err := ledger.Debit(pubKeyHex, tx.StakeAmount); err != nil {
+			log.Printf("ApplyLedgerMutations: STAKE debit failed for %s: %v", pubKeyHex[:8], err)
+		}
+	}
 }
 
-// ApplyDomainMutations processes domain-state effects and the BUY price transfer.
+// ApplyStakeMutations processes StakeMap / UnstakeQueue / slashedEvidence effects for tx.
+func ApplyStakeMutations(tx Transaction, stakeMap StakeStorer,
+	unstakeQueue *UnstakeQueue, slashedEvidence map[string]bool, currentSlot int64) {
+	// slashedEvidence must be a staging copy — the caller commits it to real state after block finalization.
+	if len(tx.OwnerKey) == 0 {
+		return
+	}
+	pubKeyHex := hex.EncodeToString(tx.OwnerKey)
+
+	switch tx.Type {
+	case STAKE:
+		stakeMap.AddStake(pubKeyHex, tx.StakeAmount)
+
+	case UNSTAKE:
+		stakeMap.ReduceStake(pubKeyHex, tx.StakeAmount)
+		matureSlot := uint64(currentSlot) + UnstakeDelaySlots
+		unstakeQueue.Enqueue(pubKeyHex, tx.StakeAmount, matureSlot)
+
+	case EQUIVOCATION_PROOF:
+		if len(tx.EquivBlockA) == 0 {
+			return
+		}
+		blockA := DeserializeBlock(tx.EquivBlockA)
+		if blockA == nil {
+			return
+		}
+		offenderHex := hex.EncodeToString(blockA.SlotLeader)
+		offenseKey := fmt.Sprintf("%d:%s", blockA.Index, offenderHex)
+		if slashedEvidence[offenseKey] {
+			return
+		}
+		totalSlashable := stakeMap.GetStake(offenderHex) + unstakeQueue.GetPendingStake(offenderHex)
+		slashAmount := ComputeSlashAmount(totalSlashable, SlashingPercent)
+		stakedNow := stakeMap.GetStake(offenderHex)
+		if slashAmount <= stakedNow {
+			stakeMap.ReduceStake(offenderHex, slashAmount)
+		} else {
+			stakeMap.ReduceStake(offenderHex, stakedNow)
+			unstakeQueue.BurnPending(offenderHex, slashAmount-stakedNow)
+		}
+		slashedEvidence[offenseKey] = true
+	}
+}
+
 func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexer,
 	currentSlot int64, txIndex int, slotsPerDay int64) error {
 
