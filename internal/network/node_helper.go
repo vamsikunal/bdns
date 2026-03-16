@@ -22,14 +22,17 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		}
 	} else {
 		imOverlay := index.NewIndexOverlay(n.IndexManager)
-		staging, _, _, _, ok := blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(),
+		staging, _, _, _, commitOverlay, ok := blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(),
 			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay,
-			blockchain.NewStakeMap(), blockchain.NewUnstakeQueue(), nil)
+			blockchain.NewStakeMap(), blockchain.NewUnstakeQueue(), nil, n.CommitStore)
 		if !ok {
 			log.Println("Invalid block received at", n.Address)
 			return
 		}
 		n.BalanceLedger = staging
+		if commitOverlay != nil && n.CommitStore != nil {
+			commitOverlay.Commit(n.CommitStore)
+		}
 	}
 
 	n.TxMutex.Lock()
@@ -76,7 +79,8 @@ func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	commitSnap.PurgeExpired(nextBlockIndex)
 
 	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager, commitSnap,
-		currentSlot, slotsPerDay, false, nil, nextBlockIndex) {
+		currentSlot, slotsPerDay, false, nil, nextBlockIndex,
+		blockchain.NewStakeMap(), blockchain.NewUnstakeQueue(), nil) {
 		log.Printf("AddTransaction: rejected TID %d — validation failed", tx.TID)
 		return
 	}
