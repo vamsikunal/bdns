@@ -36,7 +36,10 @@ type Node struct {
 	BcMutex         sync.Mutex
 	RandomNumber    []byte
 	RandomMutex     sync.Mutex
-	EpochRandoms    map[int64]map[string]consensus.SecretValues
+	EpochRandoms    map[int64]map[string][]byte            
+	EpochCommitments map[int64]map[string][]byte           
+	MySecrets       map[int64]consensus.SecretValues       
+	PendingReveals  map[int64]map[string]consensus.RevealData
 	IsFullNode      bool // full vs light node
 	PeerID          string
 	KnownFullPeers  []string
@@ -76,9 +79,12 @@ func NewNode(ctx context.Context, addr string, topicName string, isFullNode bool
 		SlotLeaders:     make(map[int64][]byte),
 		TransactionPool: make(map[int]*blockchain.Transaction),
 		IndexManager:    index.NewIndexManager(),
-		Blockchain:      nil,
-		EpochRandoms:    make(map[int64]map[string]consensus.SecretValues),
-		IsFullNode:      isFullNode,
+		Blockchain:       nil,
+		EpochRandoms:     make(map[int64]map[string][]byte),
+		EpochCommitments: make(map[int64]map[string][]byte),
+		MySecrets:        make(map[int64]consensus.SecretValues),
+		PendingReveals:   make(map[int64]map[string]consensus.RevealData),
+		IsFullNode:       isFullNode,
 		PeerID:          p2p.Host.ID().String(),
 		KnownFullPeers:  []string{},
 	}
@@ -227,16 +233,24 @@ func (n *Node) MakeDNSRequest(domainName string, metrics *metrics.DNSMetrics) {
 }
 
 func (n *Node) BroadcastRandomNumber(epoch int64) {
-	_, secretValues := consensus.CommitmentPhase(n.RegistryKeys)
-	nodeSecretValues := secretValues[hex.EncodeToString(n.KeyPair.PublicKey)]
+	sv, err := consensus.CommitmentPhase(n.KeyPair.PublicKey)
+	if err != nil {
+		log.Printf("BroadcastRandomNumber: CommitmentPhase failed: %v", err)
+		return
+	}
+	n.RandomMutex.Lock()
+	if n.EpochRandoms[epoch] == nil {
+		n.EpochRandoms[epoch] = make(map[string][]byte)
+	}
+	n.EpochRandoms[epoch][hex.EncodeToString(n.KeyPair.PublicKey)] = sv.U
+	n.RandomMutex.Unlock()
 
 	msg := RandomNumberMsg{
 		Epoch:       epoch,
-		SecretValue: nodeSecretValues.SecretValue,
-		RandomValue: nodeSecretValues.RandomValue,
+		SecretValue: 0,
+		RandomValue: 0,
 		Sender:      n.KeyPair.PublicKey,
 	}
-	n.RandomNumberHandler(epoch, hex.EncodeToString(n.KeyPair.PublicKey), nodeSecretValues.SecretValue, nodeSecretValues.RandomValue)
 	n.P2PNetwork.BroadcastMessage(MsgRandomNumber, msg, nil)
 }
 
@@ -305,17 +319,15 @@ func (n *Node) DNSResponseHandler(res BDNSResponse) {
 	}
 }
 
-func (n *Node) RandomNumberHandler(epoch int64, sender string, secretValue int, randomValue int) {
+func (n *Node) RandomNumberHandler(epoch int64, sender string, _ int, _ int) {
 	n.RandomMutex.Lock()
 	defer n.RandomMutex.Unlock()
-
 	if n.EpochRandoms[epoch] == nil {
-		n.EpochRandoms[epoch] = make(map[string]consensus.SecretValues)
+		n.EpochRandoms[epoch] = make(map[string][]byte)
 	}
-
-	n.EpochRandoms[epoch][sender] = consensus.SecretValues{
-		SecretValue: secretValue,
-		RandomValue: randomValue,
+	// U field not available via old int path — entry stored empty until replaced by CommitmentHandler
+	if _, exists := n.EpochRandoms[epoch][sender]; !exists {
+		n.EpochRandoms[epoch][sender] = nil
 	}
 }
 
