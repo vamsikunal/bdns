@@ -3,7 +3,10 @@ package network
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	"crypto/ecdsa"
+	cryptoRand "crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -100,7 +103,7 @@ func (n *Node) GenerateRandomNumber() []byte {
 	defer n.RandomMutex.Unlock()
 
 	randomBytes := make([]byte, 32)
-	if _, err := rand.Read(randomBytes); err != nil {
+	if _, err := cryptoRand.Read(randomBytes); err != nil {
 		log.Panic("Failed to generate random number:", err)
 	}
 
@@ -253,6 +256,77 @@ func (n *Node) BroadcastRandomNumber(epoch int64) {
 	}
 	n.P2PNetwork.BroadcastMessage(MsgRandomNumber, msg, nil)
 }
+
+// BroadcastCommitment runs the commitment phase for epoch and broadcasts
+// the commitment hash to all peers. U and R are stored locally and never sent here.
+func (n *Node) BroadcastCommitment(epoch int64) error {
+	sv, err := consensus.CommitmentPhase(n.KeyPair.PublicKey)
+	if err != nil {
+		return fmt.Errorf("BroadcastCommitment: %w", err)
+	}
+
+	n.RandomMutex.Lock()
+	n.MySecrets[epoch] = sv
+	n.RandomMutex.Unlock()
+
+	senderHex := hex.EncodeToString(n.KeyPair.PublicKey)
+	msg := CommitmentMsg{
+		Epoch:      epoch,
+		Commitment: sv.Commitment,
+		Sender:     senderHex,
+	}
+
+	// Sign: SHA-256(epoch bytes || commitment || sender)
+	epochBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBuf, uint64(epoch))
+	payload := append(epochBuf, sv.Commitment...)
+	payload = append(payload, []byte(senderHex)...)
+	h := sha256.Sum256(payload)
+	sig, err := ecdsa.SignASN1(cryptoRand.Reader, &n.KeyPair.PrivateKey, h[:])
+	if err != nil {
+		return fmt.Errorf("BroadcastCommitment: sign failed: %w", err)
+	}
+	msg.Signature = sig
+
+	n.P2PNetwork.BroadcastMessage(MsgCommitment, msg, nil)
+	return nil
+}
+
+// BroadcastReveal broadcasts the reveal message for epoch, exposing U and R so
+// peers can verify the commitment and extract the randomness contribution.
+func (n *Node) BroadcastReveal(epoch int64) error {
+	n.RandomMutex.Lock()
+	sv, ok := n.MySecrets[epoch]
+	n.RandomMutex.Unlock()
+	if !ok {
+		return fmt.Errorf("BroadcastReveal: no commitment found for epoch %d", epoch)
+	}
+
+	senderHex := hex.EncodeToString(n.KeyPair.PublicKey)
+	msg := RevealMsg{
+		Epoch:  epoch,
+		U:      sv.U,
+		R:      sv.R,
+		Sender: senderHex,
+	}
+
+	// Sign: SHA-256(epoch bytes || U || R || sender)
+	epochBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBuf, uint64(epoch))
+	payload := append(epochBuf, sv.U...)
+	payload = append(payload, sv.R...)
+	payload = append(payload, []byte(senderHex)...)
+	h := sha256.Sum256(payload)
+	sig, err := ecdsa.SignASN1(cryptoRand.Reader, &n.KeyPair.PrivateKey, h[:])
+	if err != nil {
+		return fmt.Errorf("BroadcastReveal: sign failed: %w", err)
+	}
+	msg.Signature = sig
+
+	n.P2PNetwork.BroadcastMessage(MsgReveal, msg, nil)
+	return nil
+}
+
 
 func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *metrics.DNSMetrics) {
 	start := time.Now()
