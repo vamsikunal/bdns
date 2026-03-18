@@ -63,7 +63,9 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 		n.P2PNetwork.BroadcastMessage(MsgBlock, *genesisBlock, nil)
 		fmt.Print("Genesis block created and broadcasted by node ", n.Address, "\n\n")
 	}
-	n.BroadcastRandomNumber(1)                                                            // Broadcast nums for the fist epoch
+	if err := n.BroadcastCommitment(1); err != nil {
+		log.Printf("BroadcastCommitment epoch 1 failed: %v", err)
+	}
 	time.Sleep(time.Duration(n.Config.SlotInterval*n.Config.SlotsPerEpoch) * time.Second) // wait till end of epoch
 
 	// Initialize loop variables
@@ -85,7 +87,19 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 		if newEpoch != epoch {
 			epoch = newEpoch
 			currSlotLeader = n.GetSlotLeader(epoch)
-			n.BroadcastRandomNumber(epoch + 1) // Send rand nums for next epoch
+			// Slot 0 of new epoch: broadcast commitment
+			if slot%n.Config.SlotsPerEpoch == 0 {
+				if err := n.BroadcastCommitment(epoch + 1); err != nil {
+					log.Printf("BroadcastCommitment epoch %d failed: %v", epoch+1, err)
+				}
+			}
+			// Slot 1 of new epoch: broadcast reveal
+			if slot%n.Config.SlotsPerEpoch == 1 {
+				if err := n.BroadcastReveal(epoch); err != nil {
+					log.Printf("BroadcastReveal epoch %d failed: %v", epoch, err)
+				}
+				n.PruneDRGEpochState(epoch)
+			}
 		}
 
 		// Only the current slot leader should produce a block
