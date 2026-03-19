@@ -55,6 +55,10 @@ type Node struct {
 	dnsConn         *net.UDPConn             // DNS server listener; closed by NodesCleanup
 	BalanceLedger   *blockchain.BalanceLedger
 	CommitStore     *blockchain.CommitStore
+	StakeMap        blockchain.StakeStorer
+	UnstakeQueue    *blockchain.UnstakeQueue
+	SlashedEvidence map[string]bool
+	StakeMutex      sync.Mutex
 }
 
 // Node Config
@@ -93,6 +97,9 @@ func NewNode(ctx context.Context, addr string, topicName string, isFullNode bool
 		PendingReveals:   make(map[int64]map[string]consensus.RevealData),
 		DRGDedupCache:    make(map[string]uint64),
 		IsFullNode:       isFullNode,
+		StakeMap:         blockchain.NewStakeMap(),
+		UnstakeQueue:     blockchain.NewUnstakeQueue(),
+		SlashedEvidence:  make(map[string]bool),
 		PeerID:          p2p.Host.ID().String(),
 		KnownFullPeers:  []string{},
 	}
