@@ -37,15 +37,18 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		stagingEvidence := copyStringBoolMap(n.SlashedEvidence)
 		n.StakeMutex.Unlock()
 
-		staging, newStakeMap, newQueue, newEvidence, ok := blockchain.ValidateBlock(
+		staging, newStakeMap, newQueue, newEvidence, commitOverlay, ok := blockchain.ValidateBlock(
 			block, n.Blockchain.GetLatestBlock(),
 			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay,
-			stagingStake, stagingQueue, stagingEvidence)
+			stagingStake, stagingQueue, stagingEvidence, n.CommitStore)
 		if !ok {
 			log.Println("Invalid block received at", n.Address)
 			return
 		}
 		n.BalanceLedger = staging
+		if commitOverlay != nil && n.CommitStore != nil {
+			commitOverlay.Commit(n.CommitStore)
+		}
 		imOverlay.Commit()
 
 		n.StakeMutex.Lock()

@@ -266,34 +266,34 @@ func ValidateGenesisBlock(block *Block, registryKeys [][]byte, slotLeaderKey []b
 func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	ledger *BalanceLedger, im DomainIndexer, expiryChecker ExpiryChecker,
 	slotsPerDay int64, stakeMap StakeStorer, unstakeQueue *UnstakeQueue,
-	slashedEvidence map[string]bool) (*BalanceLedger, StakeStorer, *UnstakeQueue, map[string]bool, bool) {
+	slashedEvidence map[string]bool, cs *CommitStore) (*BalanceLedger, StakeStorer, *UnstakeQueue, map[string]bool, *CommitOverlay, bool) {
 
 	if oldBlock.Index+1 != newBlock.Index {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if newBlock.SlotNumber <= oldBlock.SlotNumber {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(oldBlock.Hash, newBlock.PrevHash) {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.SlotLeader, slotLeaderKey) {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !newBlock.VerifyBlock(slotLeaderKey) {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.MerkleRootHash, newBlock.SetupMerkleTree()) {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.Hash, newBlock.ComputeHash()) {
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// Staging clones — mutations stay isolated until the block is accepted
@@ -302,6 +302,13 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	stagingSlashed := make(map[string]bool, len(slashedEvidence))
 	for k, v := range slashedEvidence {
 		stagingSlashed[k] = v
+	}
+
+	// CommitOverlay logic
+	var commitOverlay *CommitOverlay
+	if cs != nil {
+		commitOverlay = NewCommitOverlay(cs.ExportPending(), newBlock.Index)
+		commitOverlay.PurgeExpired(newBlock.Index)
 	}
 
 	// Mature any queued unstakes before processing this block's transactions
@@ -334,17 +341,17 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 			}
 			if !found {
 				log.Println("Block missing required purge:", expected.DomainName, "TID:", expected.TID)
-				return nil, nil, nil, nil, false
+				return nil, nil, nil, nil, nil, false
 			}
 		}
 	}
 
 	// 3-gate re-check: malicious leader may bypass mempool
-	if !ValidateTransactions(newBlock.Transactions, ledger, im, nil,
+	if !ValidateTransactions(newBlock.Transactions, ledger, im, commitOverlay,
 		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader, newBlock.Index,
 		stakeMap, unstakeQueue, slashedEvidence) {
 		log.Printf("ValidateBlock: ValidateTransactions failed — block rejected")
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// nonce + fee on staging clone
@@ -361,32 +368,37 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	}
 	if !bytes.Equal(newBlock.BalanceLedgerHash, staging.Hash()) {
 		log.Printf("ValidateBlock: BalanceLedgerHash mismatch — block rejected")
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// domain mutations on overlay
 	for i, tx := range newBlock.Transactions {
-		ApplyDomainMutations(tx, staging, im, nil, newBlock.SlotNumber, newBlock.Index, i, slotsPerDay)
+		ApplyDomainMutations(tx, staging, im, commitOverlay, newBlock.SlotNumber, newBlock.Index, i, slotsPerDay)
 	}
 	if !bytes.Equal(newBlock.IndexHash, im.GetIndexHash()) {
 		log.Printf("ValidateBlock: IndexHash mismatch — block rejected")
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
+	}
+	
+	if commitOverlay != nil && !bytes.Equal(newBlock.CommitStoreHash, commitOverlay.Hash()) {
+		log.Printf("ValidateBlock: CommitStoreHash mismatch — block rejected")
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// Verify stake hashes match the staging state after all mutations
 	if !bytes.Equal(newBlock.StakeMapHash, stagingStake.Hash()) {
 		log.Printf("ValidateBlock: StakeMapHash mismatch — block rejected")
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 	if !bytes.Equal(newBlock.UnstakeQueueHash, stagingQueue.Hash()) {
 		log.Printf("ValidateBlock: UnstakeQueueHash mismatch — block rejected")
-		return nil, nil, nil, nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// commit domain overlay to real state
 	im.Commit()
 
-	return staging, stagingStake, stagingQueue, stagingSlashed, true
+	return staging, stagingStake, stagingQueue, stagingSlashed, commitOverlay, true
 }
 
 // ValidateTransactions implements the 3-gate validation model.
