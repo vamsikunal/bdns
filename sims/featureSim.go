@@ -43,43 +43,66 @@ func FeatureSim() {
 		{Type: "MX", Value: "backup-mail.canonical.bdns", Priority: 20},
 		{Type: "TXT", Value: "v=spf1 include:canonical.bdns ~all", Priority: 0},
 	}
-	registerDomain(reg, "canonical.bdns", canonicalRecords, 1, regNonce)
-	regNonce++
-	fmt.Println("[REGISTER] canonical.bdns — A, AAAA, 2×MX, TXT")
-	time.Sleep(1 * time.Second)
-
 	aliasRecords := []blockchain.Record{
 		{Type: "CNAME", Value: "canonical.bdns", Priority: 0},
 	}
-	registerDomain(reg, "alias.bdns", aliasRecords, 1, regNonce)
-	regNonce++
-	fmt.Println("[REGISTER] alias.bdns — CNAME → canonical.bdns")
-	time.Sleep(1 * time.Second)
-
 	deepRecords := []blockchain.Record{
 		{Type: "CNAME", Value: "alias.bdns", Priority: 0},
 	}
-	registerDomain(reg, "deep.bdns", deepRecords, 1, regNonce)
-	regNonce++
-	fmt.Println("[REGISTER] deep.bdns — CNAME → alias.bdns (2-hop chain)")
-	time.Sleep(1 * time.Second)
-
 	mxOnlyRecords := []blockchain.Record{
 		{Type: "MX", Value: "mail1.mx-only.bdns", Priority: 5},
 		{Type: "MX", Value: "mail2.mx-only.bdns", Priority: 10},
 	}
-	registerDomain(reg, "mx-only.bdns", mxOnlyRecords, 1, regNonce)
-	regNonce++
-	fmt.Println("[REGISTER] mx-only.bdns — 2×MX (no A)")
-	time.Sleep(1 * time.Second)
-
 	renewableRecords := []blockchain.Record{
 		{Type: "A", Value: "10.0.5.5", Priority: 0},
 		{Type: "TXT", Value: "initial-registration", Priority: 0},
 	}
-	registerDomain(reg, "renew-me.bdns", renewableRecords, 1, regNonce)
+
+	// COMMIT phase: send blind commits for all domains
+	type pendingCommit struct{ domain string; records []blockchain.Record; tid int; salt []byte }
+	var commits []pendingCommit
+
+	canonicalTID, canonicalSalt := registerDomain(reg, "canonical.bdns", canonicalRecords, 1, regNonce)
+	commits = append(commits, pendingCommit{"canonical.bdns", canonicalRecords, canonicalTID, canonicalSalt})
 	regNonce++
-	fmt.Println("[REGISTER] renew-me.bdns — A + TXT (will be renewed)")
+	fmt.Println("[COMMIT] canonical.bdns")
+	time.Sleep(1 * time.Second)
+
+	aliasTID, aliasSalt := registerDomain(reg, "alias.bdns", aliasRecords, 1, regNonce)
+	commits = append(commits, pendingCommit{"alias.bdns", aliasRecords, aliasTID, aliasSalt})
+	regNonce++
+	fmt.Println("[COMMIT] alias.bdns")
+	time.Sleep(1 * time.Second)
+
+	deepTID, deepSalt := registerDomain(reg, "deep.bdns", deepRecords, 1, regNonce)
+	commits = append(commits, pendingCommit{"deep.bdns", deepRecords, deepTID, deepSalt})
+	regNonce++
+	fmt.Println("[COMMIT] deep.bdns")
+	time.Sleep(1 * time.Second)
+
+	mxTID, mxSalt := registerDomain(reg, "mx-only.bdns", mxOnlyRecords, 1, regNonce)
+	commits = append(commits, pendingCommit{"mx-only.bdns", mxOnlyRecords, mxTID, mxSalt})
+	regNonce++
+	fmt.Println("[COMMIT] mx-only.bdns")
+	time.Sleep(1 * time.Second)
+
+	renewTID, renewSalt := registerDomain(reg, "renew-me.bdns", renewableRecords, 1, regNonce)
+	commits = append(commits, pendingCommit{"renew-me.bdns", renewableRecords, renewTID, renewSalt})
+	regNonce++
+	fmt.Println("[COMMIT] renew-me.bdns")
+
+	// Wait for COMMITs to be mined and delay to pass
+	fmt.Println("\n[WAIT] Waiting for COMMITs to be mined (including delay)...")
+	time.Sleep(time.Duration(slotInterval*(slotsPerEpoch+int(blockchain.CommitMinDelay)+1)) * time.Second)
+
+	// REVEAL phase
+	for _, c := range commits {
+		regNonce = reg.BalanceLedger.GetNonce(regPubKeyHex)
+		revealDomain(reg, c.domain, c.records, c.tid, c.salt, 1, regNonce)
+		regNonce++
+		fmt.Printf("[REVEAL] %s\n", c.domain)
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	// Wait for registrations to be committed
 	fmt.Println("\n[WAIT] Waiting for registrations to be committed (30s)...")
@@ -200,21 +223,29 @@ func FeatureSim() {
 	fmt.Println("Feature simulation completed.")
 }
 
-// registerDomain is a helper that calls NewTransaction and broadcasts it.
-func registerDomain(node *network.Node, domain string, records []blockchain.Record, fee uint64, nonce uint64) {
+// registerDomain broadcasts a COMMIT for domain registration, returns (commitTID, salt).
+func registerDomain(node *network.Node, domain string, records []blockchain.Record, fee uint64, nonce uint64) (int, []byte) {
+	const saltLen = 16
+	salt := make([]byte, saltLen)
+	for i, c := range []byte(domain) {
+		salt[i%saltLen] ^= c
+	}
+	commitTx := blockchain.NewCommitTransaction(domain, salt,
+		node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, fee, nonce, node.TransactionPool)
+	node.BroadcastTransaction(*commitTx)
+	return commitTx.TID, salt
+}
+
+// revealDomain reveals a previously committed domain.
+func revealDomain(node *network.Node, domain string, records []blockchain.Record,
+	commitTID int, salt []byte, fee uint64, nonce uint64) {
 	const ttl = int64(3600)
-	const slotsPerDay = int64(86400 / 5) // 5s slots
-	tx := blockchain.NewTransaction(
-		blockchain.REGISTER,
-		domain,
-		records,
-		ttl,
-		0, slotsPerDay, 0,
-		node.KeyPair.PublicKey,
-		&node.KeyPair.PrivateKey,
-		node.TransactionPool,
-		fee, nonce,
-	)
+	const slotsPerDay = int64(86400 / 5)
+	nextBlock := node.Blockchain.GetLatestBlock().Index + 1
+	tx := blockchain.NewRevealTransaction(domain, salt, records,
+		ttl, nextBlock, slotsPerDay, commitTID,
+		node.KeyPair.PublicKey, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey,
+		fee, nonce, node.TransactionPool)
 	node.BroadcastTransaction(*tx)
 }
 

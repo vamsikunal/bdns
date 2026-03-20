@@ -24,29 +24,60 @@ func SimpleSim() {
 	fmt.Println("Waiting for genesis block to be created...")
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
 
-	// Each node registers its own domains
+	// Each node registers its own domain via COMMIT → REVEAL
 	domains := make([]string, numNodes)
+	commitTIDs := make([]int, numNodes)
+	salts := make([][]byte, numNodes)
+	slotsPerDay := int64(86400 / slotInterval)
 	for i, node := range nodes {
 		domains[i] = fmt.Sprintf("node%d.com", i+1)
 		ip := fmt.Sprintf("192.168.1.%d", i+1)
-		ttl := int64(3600)
 		records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
 		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
 		nonce := node.BalanceLedger.GetNonce(pubKeyHex)
-		tx := blockchain.NewTransaction(blockchain.REGISTER, domains[i], records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool, 1, nonce)
-		node.BroadcastTransaction(*tx)
-		fmt.Printf("[REGISTER] node%d → %s → %s\n", i+1, domains[i], ip)
-		time.Sleep(500 * time.Millisecond) // stagger to avoid all txs in same pool slot
+
+		// Generate salt
+		salt := make([]byte, 16)
+		for j := range salt {
+			salt[j] = byte(i*16 + j)
+		}
+		salts[i] = salt
+		_ = records
+
+		commitTx := blockchain.NewCommitTransaction(domains[i], salt,
+			node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, 1, nonce, node.TransactionPool)
+		commitTIDs[i] = commitTx.TID
+		node.BroadcastTransaction(*commitTx)
+		fmt.Printf("[COMMIT] node%d → %s\n", i+1, domains[i])
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	fmt.Println("[SimpleSim] Waiting for commits...")
+	fmt.Println("[SimpleSim] Waiting for COMMITs to be mined...")
+	time.Sleep(time.Duration(slotInterval*(slotsPerEpoch+int(blockchain.CommitMinDelay)+1)) * time.Second)
+
+	// REVEAL each domain
+	for i, node := range nodes {
+		ip := fmt.Sprintf("192.168.1.%d", i+1)
+		records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
+		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		nonce := node.BalanceLedger.GetNonce(pubKeyHex)
+
+		nextBlock := node.Blockchain.GetLatestBlock().Index + 1
+		revealTx := blockchain.NewRevealTransaction(domains[i], salts[i], records,
+			3600, nextBlock, slotsPerDay, commitTIDs[i],
+			node.KeyPair.PublicKey, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey,
+			1, nonce, node.TransactionPool)
+		node.BroadcastTransaction(*revealTx)
+		fmt.Printf("[REVEAL] node%d → %s → %s\n", i+1, domains[i], ip)
+		time.Sleep(500 * time.Millisecond)
+	}
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*2) * time.Second)
 
 	queryNode := bestQueryNode(nodes, domains)
 	fmt.Printf("[SimpleSim] Query node: %s\n\n", queryNode.Address)
 
 	currentSlot := (time.Now().Unix() - queryNode.Config.InitialTimestamp) / queryNode.Config.SlotInterval
-	slotsPerDay := int64(86400 / slotInterval)
+	slotsPerDay = int64(86400 / slotInterval)
 
 	fmt.Println("=== SimpleSim: Resolution Checks ===")
 	pass, fail, skip := 0, 0, 0
