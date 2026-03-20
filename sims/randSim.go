@@ -104,6 +104,9 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 				}
 			}
 
+			type pendingEntry struct{ domain string; records []blockchain.Record; salt []byte; commitBlock int64 }
+			pendingCommits := make(map[int]pendingEntry) // commitTID → entry
+
 			for time.Now().Before(simStopTime) {
 				if node.Blockchain != nil {
 					node.BcMutex.Lock()
@@ -111,29 +114,55 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					node.BcMutex.Unlock()
 					if latest != nil && latest.Index > lastSeenBlock {
 						onBlockCommit()
+						// Fire any pending REVEALs whose delay has elapsed
+						for tid, entry := range pendingCommits {
+							if latest.Index-entry.commitBlock >= blockchain.CommitMinDelay {
+								nonce := getNextNonce(pubKeyHex)
+								slotsPerDay := int64(86400 / slotInterval)
+								nextBlock := latest.Index + 1
+								revealTx := blockchain.NewRevealTransaction(
+									entry.domain, entry.salt, entry.records,
+									3600, nextBlock, slotsPerDay, tid,
+									node.KeyPair.PublicKey, node.KeyPair.PublicKey,
+									&node.KeyPair.PrivateKey, 1, nonce, node.TransactionPool)
+								node.BroadcastTransaction(*revealTx)
+								commitNonce(pubKeyHex)
+								fmt.Printf("Node %d revealed domain %s\n", id+1, entry.domain)
+								delete(pendingCommits, tid)
+								// Add domain to known list after REVEAL
+								domainsMu.Lock()
+								domains = append(domains, entry.domain)
+								domainsMu.Unlock()
+							}
+						}
 						lastSeenBlock = latest.Index
 					}
 				}
 
-				// Chance to create transaction
-				if rand.Float64() < txProbability {
+				// Chance to COMMIT a new domain
+				if time.Now().Before(txOnlyTime) && rand.Float64() < txProbability {
 					domainsMu.Lock()
-					domain := fmt.Sprintf("tx%d-node%d.com", len(domains), id+1)
+					domain := fmt.Sprintf("tx%d-node%d.com", len(domains)+len(pendingCommits), id+1)
 					domainsMu.Unlock()
 
 					ip := fmt.Sprintf("10.0.%d.%d", id+1, rand.Intn(255))
-					ttl := int64(3600)
 					records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
+					salt := make([]byte, 16)
+					for k := range salt {
+						salt[k] = byte(rand.Intn(256))
+					}
 					nonce := getNextNonce(pubKeyHex)
-					tx := blockchain.NewTransaction(blockchain.REGISTER, domain, records, ttl, 0, 17280, 0, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, node.TransactionPool, 1, nonce)
-					node.BroadcastTransaction(*tx)
+					commitTx := blockchain.NewCommitTransaction(domain, salt,
+						node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, 1, nonce, node.TransactionPool)
+					node.BroadcastTransaction(*commitTx)
 					commitNonce(pubKeyHex)
-					fmt.Printf("Node %d sent transaction for domain %s\n", id+1, domain)
 
-					domainsMu.Lock()
-					domains = append(domains, domain)
-					domainsMu.Unlock()
+					node.BcMutex.Lock()
+					commitBlock := node.Blockchain.GetLatestBlock().Index
+					node.BcMutex.Unlock()
+					pendingCommits[commitTx.TID] = pendingEntry{domain, records, salt, commitBlock}
 
+					fmt.Printf("Node %d sent COMMIT for domain %s\n", id+1, domain)
 					atomic.AddInt64(&totalTxns, 1)
 				}
 
