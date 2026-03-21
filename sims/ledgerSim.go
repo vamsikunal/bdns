@@ -28,6 +28,24 @@ func LedgerSim() {
 	fmt.Println("=== Ledger Sim: waiting for genesis block ===")
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
 
+	// STAKE phase: Each node STAKEs coins to become eligible for leader election
+	fmt.Println("[LedgerSim] Issuing STAKE transactions...")
+	for i, node := range nodes {
+		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		nonce := node.BalanceLedger.GetNonce(pubKeyHex)
+
+		stakeTx := blockchain.NewStakeTransaction(10000,
+			node.KeyPair.PublicKey, &node.KeyPair.PrivateKey,
+			1, nonce, node.TransactionPool)
+
+		node.BroadcastTransaction(*stakeTx)
+		fmt.Printf("[STAKE] node%d staked 10000 coins\n", i+1)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	fmt.Println("[LedgerSim] Waiting for STAKEs to be mined...")
+	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*3) * time.Second)
+
 	// Node aliases
 	nodeA := nodes[0] // TrustedRegistry — registers, lists, delists
 	nodeB := nodes[2] // TrustedRegistry — receives FUND + BUY
