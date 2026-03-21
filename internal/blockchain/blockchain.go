@@ -37,13 +37,13 @@ func CreateBlockchain(chainID string) *Blockchain {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucket([]byte(blocksBucket))
+		_, err := tx.CreateBucketIfNotExists([]byte(blocksBucket))
 		if err != nil {
 			log.Panic(err)
 		}
 
 		// Create spent transactions bucket
-		_, err = tx.CreateBucket([]byte(spentTxsBucket))
+		_, err = tx.CreateBucketIfNotExists([]byte(spentTxsBucket))
 		if err != nil {
 			log.Panic(err)
 		}
@@ -237,7 +237,13 @@ func (bc *Blockchain) GetLatestBlock() *Block {
 	err := bc.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		lastHash := b.Get([]byte("l"))
+		if lastHash == nil {
+			return nil
+		}
 		blockData := b.Get(lastHash)
+		if blockData == nil {
+			return nil
+		}
 		block = DeserializeBlock(blockData)
 
 		return nil
