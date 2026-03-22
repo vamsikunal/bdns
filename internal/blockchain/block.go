@@ -385,6 +385,11 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 		return nil, nil, nil, nil, nil, false
 	}
 
+	// Apply stake mutations to staging clones (mirror what the leader does)
+	for _, tx := range newBlock.Transactions {
+		ApplyStakeMutations(tx, stagingStake, stagingQueue, stagingSlashed, newBlock.SlotNumber)
+	}
+
 	// Verify stake hashes match the staging state after all mutations
 	if !bytes.Equal(newBlock.StakeMapHash, stagingStake.Hash()) {
 		log.Printf("ValidateBlock: StakeMapHash mismatch — block rejected")
@@ -919,10 +924,11 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 				log.Printf("ValidateTransactions: REVEAL gate R2 — PubKey mismatch, TID=%d", tx.TID)
 				return false
 			}
-			// Gate R3: minimum delay
-			blocksSinceCommit := blockIndex - commitRecord.CommitBlock
-			if blocksSinceCommit < CommitMinDelay {
-				log.Printf("ValidateTransactions: REVEAL gate R3 — premature (%d blocks, need %d), TID=%d", blocksSinceCommit, CommitMinDelay, tx.TID)
+			// Gate R3: minimum delay (slot-based, not block-based, because leaders
+			// skip empty blocks so block index may not advance between COMMIT and REVEAL)
+			slotsSinceCommit := currentSlot - commitRecord.CommitSlot
+			if slotsSinceCommit < CommitMinDelay {
+				log.Printf("ValidateTransactions: REVEAL gate R3 — premature (%d slots, need %d), TID=%d", slotsSinceCommit, CommitMinDelay, tx.TID)
 				return false
 			}
 			// Gate R4: domain availability
