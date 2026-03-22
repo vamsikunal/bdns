@@ -135,3 +135,14 @@ func TestStakeSim(t *testing.T) {
 
 	sims.StakeSim()
 }
+
+func TestCommitReveal(t *testing.T) {
+	fmt.Println("\n=== Running Commit-Reveal Dedicated Test ===")
+
+	if err := sims.CleanChainData(); err != nil {
+		t.Fatalf("Failed to clean chaindata: %v", err)
+	}
+	time.Sleep(3 * time.Second)
+
+	sims.CommitRevealSim()
+}
