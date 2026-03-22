@@ -93,6 +93,9 @@ func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 		return pendingList[i].TID < pendingList[j].TID
 	})
 
+	if n.Config.SlotInterval == 0 {
+		return
+	}
 	currentSlot := (time.Now().Unix() - n.Config.InitialTimestamp) / n.Config.SlotInterval
 	slotsPerDay := int64(86400) / n.Config.SlotInterval
 
