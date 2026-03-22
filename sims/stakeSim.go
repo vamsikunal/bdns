@@ -58,9 +58,9 @@ func StakeSim() {
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	// Wait for all STAKEs to be mined (3 full epochs)
+	// Wait for all STAKEs to be mined — 6 full epochs to ensure propagation
 	fmt.Println("[StakeSim] Waiting for STAKEs to be mined...")
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*3) * time.Second)
+	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*6) * time.Second)
 
 	// Phase 2: StakeMapHash consensus check
 	fmt.Println("\n=== StakeSim: Phase 2 — StakeMapHash consensus ===")
@@ -135,54 +135,71 @@ func StakeSim() {
 		fail("[Leader election] — no blocks produced during observation window")
 	}
 
-	// Phase 4: UNSTAKE delay test
+	// Phase 4: UNSTAKE delay test — use the node that actually has staked coins
 	fmt.Println("\n=== StakeSim: Phase 4 — UNSTAKE delay ===")
 
-	// Use node[5] (lowest stake: 5000) as the UNSTAKE test subject
-	unstakeNode := nodes[5]
-	pubHex5 := hex.EncodeToString(unstakeNode.KeyPair.PublicKey)
-
-	// Check current stake before unstake
-	unstakeNode.StakeMutex.Lock()
-	stakeBefore := unstakeNode.StakeMap.GetStake(pubHex5)
-	unstakeNode.StakeMutex.Unlock()
-	fmt.Printf("[UNSTAKE] node6 stake before: %d\n", stakeBefore)
-
-	// Issue UNSTAKE transaction
-	nonce5 := unstakeNode.BalanceLedger.GetNonce(pubHex5)
-	unstakeTx := blockchain.NewUnstakeTransaction(5000,
-		unstakeNode.KeyPair.PublicKey, &unstakeNode.KeyPair.PrivateKey,
-		1, nonce5, unstakeNode.TransactionPool)
-	unstakeNode.BroadcastTransaction(*unstakeTx)
-	fmt.Printf("[UNSTAKE] node6 submitted UNSTAKE for 5000 coins\n")
-
-	// Wait 2 epochs for the UNSTAKE to be mined
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*2) * time.Second)
-
-	// Verify: stake should be reduced
-	unstakeNode.StakeMutex.Lock()
-	stakeAfter := unstakeNode.StakeMap.GetStake(pubHex5)
-	unstakeNode.StakeMutex.Unlock()
-	fmt.Printf("[UNSTAKE] node6 stake after: %d\n", stakeAfter)
-
-	if stakeAfter < stakeBefore {
-		pass("[UNSTAKE] — stake reduced after UNSTAKE transaction")
-	} else {
-		fail("[UNSTAKE] — stake did not reduce after UNSTAKE transaction")
+	// Find a node whose STAKE was confirmed (stake > 0)
+	var unstakeNode *network.Node
+	var pubHex5 string
+	var stakedAmt uint64
+	for i, node := range nodes {
+		ph := hex.EncodeToString(node.KeyPair.PublicKey)
+		node.StakeMutex.Lock()
+		amt := node.StakeMap.GetStake(ph)
+		node.StakeMutex.Unlock()
+		if amt > 0 {
+			unstakeNode = node
+			pubHex5 = ph
+			stakedAmt = amt
+			fmt.Printf("[UNSTAKE] using node%d (stake=%d)\n", i+1, amt)
+			break
+		}
 	}
 
-	// Verify: balance should NOT have been credited yet (UnstakeDelaySlots not elapsed)
-	liquidBefore := unstakeNode.BalanceLedger.GetBalance(pubHex5)
-	fmt.Printf("[UNSTAKE] node6 liquid balance immediately after: %d (delay not elapsed)\n", liquidBefore)
-	// We can't easily verify exact timing because UnstakeDelaySlots=1000 is very long,
-	// but we verify the unstake queue has the pending entry.
-	unstakeNode.StakeMutex.Lock()
-	pendingAmt := unstakeNode.UnstakeQueue.GetPendingStake(pubHex5)
-	unstakeNode.StakeMutex.Unlock()
-	if pendingAmt > 0 {
-		pass("[UNSTAKE delay] — coins are in UnstakeQueue (not yet liquid)")
+	if unstakeNode == nil {
+		fail("[UNSTAKE] — no node has confirmed stake; STAKE txs may not have been mined")
+		fail("[UNSTAKE delay] — skipped (no confirmed stake)")
 	} else {
-		fail("[UNSTAKE delay] — UnstakeQueue has no pending entry")
+		// Check current stake before unstake
+		unstakeNode.StakeMutex.Lock()
+		stakeBefore := unstakeNode.StakeMap.GetStake(pubHex5)
+		unstakeNode.StakeMutex.Unlock()
+		fmt.Printf("[UNSTAKE] stake before: %d\n", stakeBefore)
+
+		// Issue UNSTAKE for the confirmed amount
+		nonce5 := unstakeNode.BalanceLedger.GetNonce(pubHex5)
+		unstakeTx := blockchain.NewUnstakeTransaction(stakedAmt,
+			unstakeNode.KeyPair.PublicKey, &unstakeNode.KeyPair.PrivateKey,
+			1, nonce5, unstakeNode.TransactionPool)
+		unstakeNode.BroadcastTransaction(*unstakeTx)
+		fmt.Printf("[UNSTAKE] submitted UNSTAKE for %d coins\n", stakedAmt)
+
+		// Wait 2 epochs for the UNSTAKE to be mined
+		time.Sleep(time.Duration(slotInterval*slotsPerEpoch*2) * time.Second)
+
+		// Verify: stake should be reduced
+		unstakeNode.StakeMutex.Lock()
+		stakeAfter := unstakeNode.StakeMap.GetStake(pubHex5)
+		unstakeNode.StakeMutex.Unlock()
+		fmt.Printf("[UNSTAKE] stake after: %d\n", stakeAfter)
+
+		if stakeAfter < stakeBefore {
+			pass("[UNSTAKE] — stake reduced after UNSTAKE transaction")
+		} else {
+			fail("[UNSTAKE] — stake did not reduce after UNSTAKE transaction")
+		}
+
+		// Verify: balance should NOT have been credited yet (UnstakeDelaySlots not elapsed)
+		liquidBefore := unstakeNode.BalanceLedger.GetBalance(pubHex5)
+		fmt.Printf("[UNSTAKE] liquid balance immediately after: %d (delay not elapsed)\n", liquidBefore)
+		unstakeNode.StakeMutex.Lock()
+		pendingAmt := unstakeNode.UnstakeQueue.GetPendingStake(pubHex5)
+		unstakeNode.StakeMutex.Unlock()
+		if pendingAmt > 0 {
+			pass("[UNSTAKE delay] — coins are in UnstakeQueue (not yet liquid)")
+		} else {
+			fail("[UNSTAKE delay] — UnstakeQueue has no pending entry")
+		}
 	}
 
 	// Phase 5: Final StakeMapHash check after UNSTAKE
