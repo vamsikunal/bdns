@@ -4,3 +4,5 @@ chaindata
 !README.md
 *.txt
 /docs
+/scripts
+*.log

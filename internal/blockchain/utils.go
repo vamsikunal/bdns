@@ -44,7 +44,7 @@ func BytesToPublicKey(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
 	return pubKey, nil
 }
 
-func areStakesEqual(m1, m2 map[string]int) bool {
+func areStakesEqual(m1, m2 map[string]uint64) bool {
 	if len(m1) != len(m2) {
 		return false
 	}

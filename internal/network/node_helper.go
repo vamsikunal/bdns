@@ -10,6 +10,14 @@ import (
 	"github.com/bleasey/bdns/internal/index"
 )
 
+func copyStringBoolMap(src map[string]bool) map[string]bool {
+	dst := make(map[string]bool, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 func (n *Node) AddBlock(block *blockchain.Block) {
 	epoch := (block.Timestamp - n.Config.InitialTimestamp) / (n.Config.SlotInterval * n.Config.SlotsPerEpoch)
 	slotLeader := n.GetSlotLeader(epoch)
@@ -22,13 +30,33 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		}
 	} else {
 		imOverlay := index.NewIndexOverlay(n.IndexManager)
-		staging, ok := blockchain.ValidateBlock(block, n.Blockchain.GetLatestBlock(),
-			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay)
+
+		n.StakeMutex.Lock()
+		stagingStake := n.StakeMap.Clone()
+		stagingQueue := n.UnstakeQueue.Clone()
+		stagingEvidence := copyStringBoolMap(n.SlashedEvidence)
+		n.StakeMutex.Unlock()
+
+		staging, newStakeMap, newQueue, newEvidence, commitOverlay, ok := blockchain.ValidateBlock(
+			block, n.Blockchain.GetLatestBlock(),
+			slotLeader, n.BalanceLedger, imOverlay, n.IndexManager, slotsPerDay,
+			stagingStake, stagingQueue, stagingEvidence, n.CommitStore)
 		if !ok {
 			log.Println("Invalid block received at", n.Address)
 			return
 		}
 		n.BalanceLedger = staging
+		if commitOverlay != nil && n.CommitStore != nil {
+			commitOverlay.Commit(n.CommitStore)
+		}
+		imOverlay.Commit()
+
+		n.StakeMutex.Lock()
+		n.StakeMap = newStakeMap
+		n.UnstakeQueue = newQueue
+		n.SlashedEvidence = newEvidence
+		n.StakeMutex.Unlock()
+		n.RebuildValidatorSetCache(n.StakeMap)
 	}
 
 	n.TxMutex.Lock()
@@ -65,11 +93,27 @@ func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 		return pendingList[i].TID < pendingList[j].TID
 	})
 
+	if n.Config.SlotInterval == 0 {
+		return
+	}
 	currentSlot := (time.Now().Unix() - n.Config.InitialTimestamp) / n.Config.SlotInterval
 	slotsPerDay := int64(86400) / n.Config.SlotInterval
 
-	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager,
-		currentSlot, slotsPerDay, false, nil) {
+	nextBlockIndex := n.Blockchain.GetLatestBlock().Index + 1
+
+	// Clone and purge CommitStore for mempool validation snapshot
+	commitSnap := blockchain.NewCommitOverlay(n.CommitStore.ExportPending(), nextBlockIndex)
+	commitSnap.PurgeExpired(nextBlockIndex)
+
+	n.StakeMutex.Lock()
+	stakeClone := n.StakeMap.Clone()
+	queueClone := n.UnstakeQueue.Clone()
+	evidenceCopy := copyStringBoolMap(n.SlashedEvidence)
+	n.StakeMutex.Unlock()
+
+	if !blockchain.ValidateTransactions(pendingList, n.BalanceLedger, n.IndexManager, commitSnap,
+		currentSlot, slotsPerDay, false, nil, nextBlockIndex,
+		stakeClone, queueClone, evidenceCopy) {
 		log.Printf("AddTransaction: rejected TID %d — validation failed", tx.TID)
 		return
 	}

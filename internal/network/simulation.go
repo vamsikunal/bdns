@@ -101,6 +101,7 @@ func (n *Node) InitializeNodeAsync(ctx context.Context, chainID string, registry
 	for _, regKey := range registryKeys {
 		n.BalanceLedger.Seed(hex.EncodeToString(regKey), genesisBalance)
 	}
+	n.CommitStore = blockchain.NewCommitStore()
 
 	// Initialize blockchain first
 	n.BcMutex.Lock()
