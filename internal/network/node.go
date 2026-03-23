@@ -3,13 +3,17 @@ package network
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	"crypto/ecdsa"
+	cryptoRand "crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
@@ -36,7 +40,13 @@ type Node struct {
 	BcMutex         sync.Mutex
 	RandomNumber    []byte
 	RandomMutex     sync.Mutex
-	EpochRandoms    map[int64]map[string]consensus.SecretValues
+	EpochRandoms    map[int64]map[string][]byte
+	EpochCommitments map[int64]map[string][]byte
+	MySecrets       map[int64]consensus.SecretValues
+	PendingReveals  map[int64]map[string]consensus.RevealData
+	DRGDedupCache  map[string]uint64
+	DRGDedupMutex  sync.Mutex
+	ValidatorSetCacheAtomic atomic.Value // stores map[string]struct{} snapshots
 	IsFullNode      bool // full vs light node
 	PeerID          string
 	KnownFullPeers  []string
@@ -44,6 +54,11 @@ type Node struct {
 	cancel          context.CancelFunc       // cancels CreateBlockIfLeader goroutine
 	dnsConn         *net.UDPConn             // DNS server listener; closed by NodesCleanup
 	BalanceLedger   *blockchain.BalanceLedger
+	CommitStore     *blockchain.CommitStore
+	StakeMap        blockchain.StakeStorer
+	UnstakeQueue    *blockchain.UnstakeQueue
+	SlashedEvidence map[string]bool
+	StakeMutex      sync.Mutex
 }
 
 // Node Config
@@ -75,9 +90,16 @@ func NewNode(ctx context.Context, addr string, topicName string, isFullNode bool
 		SlotLeaders:     make(map[int64][]byte),
 		TransactionPool: make(map[int]*blockchain.Transaction),
 		IndexManager:    index.NewIndexManager(),
-		Blockchain:      nil,
-		EpochRandoms:    make(map[int64]map[string]consensus.SecretValues),
-		IsFullNode:      isFullNode,
+		Blockchain:       nil,
+		EpochRandoms:     make(map[int64]map[string][]byte),
+		EpochCommitments: make(map[int64]map[string][]byte),
+		MySecrets:        make(map[int64]consensus.SecretValues),
+		PendingReveals:   make(map[int64]map[string]consensus.RevealData),
+		DRGDedupCache:    make(map[string]uint64),
+		IsFullNode:       isFullNode,
+		StakeMap:         blockchain.NewStakeMap(),
+		UnstakeQueue:     blockchain.NewUnstakeQueue(),
+		SlashedEvidence:  make(map[string]bool),
 		PeerID:          p2p.Host.ID().String(),
 		KnownFullPeers:  []string{},
 	}
@@ -93,7 +115,7 @@ func (n *Node) GenerateRandomNumber() []byte {
 	defer n.RandomMutex.Unlock()
 
 	randomBytes := make([]byte, 32)
-	if _, err := rand.Read(randomBytes); err != nil {
+	if _, err := cryptoRand.Read(randomBytes); err != nil {
 		log.Panic("Failed to generate random number:", err)
 	}
 
@@ -140,13 +162,25 @@ func (n *Node) HandleMsgGivenType(msg GossipMessage, _ *metrics.DNSMetrics) {
 		}
 		n.AddBlock(&block)
 
-	case MsgRandomNumber:
-		var randomMsg RandomNumberMsg
-		err := json.Unmarshal(msg.Content, &randomMsg)
-		if err != nil {
-			log.Println("Failed to unmarshal random number message:", err)
+	case MsgCommitment:
+		var cMsg CommitmentMsg
+		if err := json.Unmarshal(msg.Content, &cMsg); err != nil {
+			log.Println("Failed to unmarshal CommitmentMsg:", err)
+			break
 		}
-		n.RandomNumberHandler(randomMsg.Epoch, hex.EncodeToString(randomMsg.Sender), randomMsg.SecretValue, randomMsg.RandomValue) // Store the received random number
+		if err := n.CommitmentHandler(cMsg); err != nil {
+			log.Println("CommitmentHandler error:", err)
+		}
+
+	case MsgReveal:
+		var rMsg RevealMsg
+		if err := json.Unmarshal(msg.Content, &rMsg); err != nil {
+			log.Println("Failed to unmarshal RevealMsg:", err)
+			break
+		}
+		if err := n.RevealHandler(rMsg); err != nil {
+			log.Println("RevealHandler error:", err)
+		}
 
 	case MsgInv:
 		n.HandleINV(msg.Sender)
@@ -225,19 +259,252 @@ func (n *Node) MakeDNSRequest(domainName string, metrics *metrics.DNSMetrics) {
 	n.P2PNetwork.BroadcastMessage(DNSRequest, req, metrics)
 }
 
-func (n *Node) BroadcastRandomNumber(epoch int64) {
-	_, secretValues := consensus.CommitmentPhase(n.RegistryKeys)
-	nodeSecretValues := secretValues[hex.EncodeToString(n.KeyPair.PublicKey)]
-
-	msg := RandomNumberMsg{
-		Epoch:       epoch,
-		SecretValue: nodeSecretValues.SecretValue,
-		RandomValue: nodeSecretValues.RandomValue,
-		Sender:      n.KeyPair.PublicKey,
-	}
-	n.RandomNumberHandler(epoch, hex.EncodeToString(n.KeyPair.PublicKey), nodeSecretValues.SecretValue, nodeSecretValues.RandomValue)
-	n.P2PNetwork.BroadcastMessage(MsgRandomNumber, msg, nil)
+// HasSeenDRGMessage returns true if this message key was already processed for this epoch.
+// Run before ECDSA verification to drop replay floods cheaply.
+func (n *Node) HasSeenDRGMessage(msgKey string, epoch uint64) bool {
+	n.DRGDedupMutex.Lock()
+	defer n.DRGDedupMutex.Unlock()
+	cachedEpoch, ok := n.DRGDedupCache[msgKey]
+	return ok && cachedEpoch == epoch
 }
+
+// MarkDRGMessageSeen records a message key as seen for this epoch.
+func (n *Node) MarkDRGMessageSeen(msgKey string, epoch uint64) {
+	n.DRGDedupMutex.Lock()
+	n.DRGDedupCache[msgKey] = epoch
+	n.DRGDedupMutex.Unlock()
+}
+
+// CommitmentHandler stores a received commitment and flushes any buffered out-of-order reveals.
+func (n *Node) CommitmentHandler(msg CommitmentMsg) error {
+	// Dedup before expensive signature verification
+	msgKey := fmt.Sprintf("commit:%d:%s", msg.Epoch, msg.Sender)
+	if n.HasSeenDRGMessage(msgKey, uint64(msg.Epoch)) {
+		return nil
+	}
+	// Verify ECDSA signature
+	pubKeyBytes, err := hex.DecodeString(msg.Sender)
+	if err != nil {
+		return fmt.Errorf("CommitmentHandler: invalid sender hex: %w", err)
+	}
+	epochBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBuf, uint64(msg.Epoch))
+	payload := append(epochBuf, msg.Commitment...)
+	payload = append(payload, []byte(msg.Sender)...)
+	h := sha256.Sum256(payload)
+	pub, err := blockchain.BytesToPublicKey(pubKeyBytes)
+	if err != nil || !ecdsa.VerifyASN1(pub, h[:], msg.Signature) {
+		return fmt.Errorf("CommitmentHandler: invalid signature from %s", msg.Sender[:8])
+	}
+	n.MarkDRGMessageSeen(msgKey, uint64(msg.Epoch))
+
+	n.RandomMutex.Lock()
+	if n.EpochCommitments[msg.Epoch] == nil {
+		n.EpochCommitments[msg.Epoch] = make(map[string][]byte)
+	}
+	n.EpochCommitments[msg.Epoch][msg.Sender] = msg.Commitment
+
+	// Flush buffered out-of-order reveals from PendingReveals
+	pending := n.PendingReveals[msg.Epoch]
+	pendingForSender := pending[msg.Sender]
+	n.RandomMutex.Unlock()
+
+	if pendingForSender.U != nil {
+		sv := consensus.SecretValues{U: pendingForSender.U, R: pendingForSender.R, Commitment: msg.Commitment}
+		if consensus.VerifyCommitment(pubKeyBytes, sv) {
+			n.RandomMutex.Lock()
+			if n.EpochRandoms[msg.Epoch] == nil {
+				n.EpochRandoms[msg.Epoch] = make(map[string][]byte)
+			}
+			n.EpochRandoms[msg.Epoch][msg.Sender] = pendingForSender.U
+			delete(n.PendingReveals[msg.Epoch], msg.Sender)
+			n.RandomMutex.Unlock()
+		}
+	}
+	return nil
+}
+
+// RevealHandler verifies and stores a reveal, or buffers it if no commitment received yet.
+func (n *Node) RevealHandler(msg RevealMsg) error {
+	// Dedup before expensive signature verification
+	msgKey := fmt.Sprintf("reveal:%d:%s", msg.Epoch, msg.Sender)
+	if n.HasSeenDRGMessage(msgKey, uint64(msg.Epoch)) {
+		return nil
+	}
+	// Verify ECDSA signature
+	pubKeyBytes, err := hex.DecodeString(msg.Sender)
+	if err != nil {
+		return fmt.Errorf("RevealHandler: invalid sender hex: %w", err)
+	}
+	epochBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBuf, uint64(msg.Epoch))
+	payload := append(epochBuf, msg.U...)
+	payload = append(payload, msg.R...)
+	payload = append(payload, []byte(msg.Sender)...)
+	h := sha256.Sum256(payload)
+	pub, err := blockchain.BytesToPublicKey(pubKeyBytes)
+	if err != nil || !ecdsa.VerifyASN1(pub, h[:], msg.Signature) {
+		return fmt.Errorf("RevealHandler: invalid signature from %s", msg.Sender[:8])
+	}
+	n.MarkDRGMessageSeen(msgKey, uint64(msg.Epoch))
+
+	n.RandomMutex.Lock()
+	commitment := n.EpochCommitments[msg.Epoch][msg.Sender]
+	n.RandomMutex.Unlock()
+
+	if commitment == nil {
+		// Buffer reveal — commitment hasn't arrived yet
+		n.RandomMutex.Lock()
+		if n.PendingReveals[msg.Epoch] == nil {
+			n.PendingReveals[msg.Epoch] = make(map[string]consensus.RevealData)
+		}
+		n.PendingReveals[msg.Epoch][msg.Sender] = consensus.RevealData{U: msg.U, R: msg.R}
+		n.RandomMutex.Unlock()
+		return nil
+	}
+
+	sv := consensus.SecretValues{U: msg.U, R: msg.R, Commitment: commitment}
+	if !consensus.VerifyCommitment(pubKeyBytes, sv) {
+		return fmt.Errorf("RevealHandler: commitment mismatch from %s", msg.Sender[:8])
+	}
+
+	n.RandomMutex.Lock()
+	if n.EpochRandoms[msg.Epoch] == nil {
+		n.EpochRandoms[msg.Epoch] = make(map[string][]byte)
+	}
+	n.EpochRandoms[msg.Epoch][msg.Sender] = msg.U
+	n.RandomMutex.Unlock()
+	return nil
+}
+
+// RebuildValidatorSetCache publishes a fresh immutable validator set snapshot
+// via ValidatorSetCacheAtomic so P2P goroutines can check without lock contention.
+func (n *Node) RebuildValidatorSetCache(stakeMap blockchain.StakeStorer) {
+	if stakeMap == nil {
+		return
+	}
+	snap := make(map[string]struct{})
+	for k := range stakeMap.GetAll() {
+		snap[k] = struct{}{}
+	}
+	n.ValidatorSetCacheAtomic.Store(snap)
+}
+
+// IsKnownValidator checks the atomic validator snapshot (no mutex, safe for concurrent reads).
+func (n *Node) IsKnownValidator(pubKeyHex string) bool {
+	v := n.ValidatorSetCacheAtomic.Load()
+	if v == nil {
+		return false
+	}
+	snap := v.(map[string]struct{})
+	_, ok := snap[pubKeyHex]
+	return ok
+}
+
+// PruneDRGEpochState deletes epoch state older than currentEpoch-2 to prevent unbounded growth.
+func (n *Node) PruneDRGEpochState(currentEpoch int64) {
+	n.RandomMutex.Lock()
+	defer n.RandomMutex.Unlock()
+	for epoch := range n.EpochRandoms {
+		if epoch < currentEpoch-2 {
+			delete(n.EpochRandoms, epoch)
+		}
+	}
+	for epoch := range n.EpochCommitments {
+		if epoch < currentEpoch-2 {
+			delete(n.EpochCommitments, epoch)
+		}
+	}
+	for epoch := range n.MySecrets {
+		if epoch < currentEpoch-2 {
+			delete(n.MySecrets, epoch)
+		}
+	}
+	for epoch := range n.PendingReveals {
+		if epoch < currentEpoch-2 {
+			delete(n.PendingReveals, epoch)
+		}
+	}
+	// Prune dedup cache entries older than currentEpoch-2
+	n.DRGDedupMutex.Lock()
+	for k, ep := range n.DRGDedupCache {
+		if int64(ep) < currentEpoch-2 {
+			delete(n.DRGDedupCache, k)
+		}
+	}
+	n.DRGDedupMutex.Unlock()
+}
+
+// BroadcastCommitment runs the commitment phase for epoch and broadcasts
+// the commitment hash to all peers. U and R are stored locally and never sent here.
+func (n *Node) BroadcastCommitment(epoch int64) error {
+	sv, err := consensus.CommitmentPhase(n.KeyPair.PublicKey)
+	if err != nil {
+		return fmt.Errorf("BroadcastCommitment: %w", err)
+	}
+
+	n.RandomMutex.Lock()
+	n.MySecrets[epoch] = sv
+	n.RandomMutex.Unlock()
+
+	senderHex := hex.EncodeToString(n.KeyPair.PublicKey)
+	msg := CommitmentMsg{
+		Epoch:      epoch,
+		Commitment: sv.Commitment,
+		Sender:     senderHex,
+	}
+
+	// Sign: SHA-256(epoch bytes || commitment || sender)
+	epochBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBuf, uint64(epoch))
+	payload := append(epochBuf, sv.Commitment...)
+	payload = append(payload, []byte(senderHex)...)
+	h := sha256.Sum256(payload)
+	sig, err := ecdsa.SignASN1(cryptoRand.Reader, &n.KeyPair.PrivateKey, h[:])
+	if err != nil {
+		return fmt.Errorf("BroadcastCommitment: sign failed: %w", err)
+	}
+	msg.Signature = sig
+
+	n.P2PNetwork.BroadcastMessage(MsgCommitment, msg, nil)
+	return nil
+}
+
+// BroadcastReveal broadcasts the reveal message for epoch, exposing U and R so
+// peers can verify the commitment and extract the randomness contribution.
+func (n *Node) BroadcastReveal(epoch int64) error {
+	n.RandomMutex.Lock()
+	sv, ok := n.MySecrets[epoch]
+	n.RandomMutex.Unlock()
+	if !ok {
+		return fmt.Errorf("BroadcastReveal: no commitment found for epoch %d", epoch)
+	}
+
+	senderHex := hex.EncodeToString(n.KeyPair.PublicKey)
+	msg := RevealMsg{
+		Epoch:  epoch,
+		U:      sv.U,
+		R:      sv.R,
+		Sender: senderHex,
+	}
+
+	// Sign: SHA-256(epoch bytes || U || R || sender)
+	epochBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(epochBuf, uint64(epoch))
+	payload := append(epochBuf, sv.U...)
+	payload = append(payload, sv.R...)
+	payload = append(payload, []byte(senderHex)...)
+	h := sha256.Sum256(payload)
+	sig, err := ecdsa.SignASN1(cryptoRand.Reader, &n.KeyPair.PrivateKey, h[:])
+	if err != nil {
+		return fmt.Errorf("BroadcastReveal: sign failed: %w", err)
+	}
+	msg.Signature = sig
+
+	n.P2PNetwork.BroadcastMessage(MsgReveal, msg, nil)
+	return nil
+}
+
 
 func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *metrics.DNSMetrics) {
 	start := time.Now()
@@ -304,17 +571,15 @@ func (n *Node) DNSResponseHandler(res BDNSResponse) {
 	}
 }
 
-func (n *Node) RandomNumberHandler(epoch int64, sender string, secretValue int, randomValue int) {
+func (n *Node) RandomNumberHandler(epoch int64, sender string, _ int, _ int) {
 	n.RandomMutex.Lock()
 	defer n.RandomMutex.Unlock()
-
 	if n.EpochRandoms[epoch] == nil {
-		n.EpochRandoms[epoch] = make(map[string]consensus.SecretValues)
+		n.EpochRandoms[epoch] = make(map[string][]byte)
 	}
-
-	n.EpochRandoms[epoch][sender] = consensus.SecretValues{
-		SecretValue: secretValue,
-		RandomValue: randomValue,
+	// U field not available via old int path — entry stored empty until replaced by CommitmentHandler
+	if _, exists := n.EpochRandoms[epoch][sender]; !exists {
+		n.EpochRandoms[epoch][sender] = nil
 	}
 }
 

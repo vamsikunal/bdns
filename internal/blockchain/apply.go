@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -27,11 +28,62 @@ func ApplyLedgerMutations(tx Transaction, ledger *BalanceLedger) {
 			ledger.Credit(recipientHex, tx.ListPrice)
 		}
 	}
+
+	// Move coins from liquid balance into staked balance
+	if tx.Type == STAKE && tx.StakeAmount > 0 {
+		if err := ledger.Debit(pubKeyHex, tx.StakeAmount); err != nil {
+			log.Printf("ApplyLedgerMutations: STAKE debit failed for %s: %v", pubKeyHex[:8], err)
+		}
+	}
+}
+
+// ApplyStakeMutations processes StakeMap / UnstakeQueue / slashedEvidence effects for tx.
+func ApplyStakeMutations(tx Transaction, stakeMap StakeStorer,
+	unstakeQueue *UnstakeQueue, slashedEvidence map[string]bool, currentSlot int64) {
+	// slashedEvidence must be a staging copy — the caller commits it to real state after block finalization.
+	if len(tx.OwnerKey) == 0 {
+		return
+	}
+	pubKeyHex := hex.EncodeToString(tx.OwnerKey)
+
+	switch tx.Type {
+	case STAKE:
+		stakeMap.AddStake(pubKeyHex, tx.StakeAmount)
+
+	case UNSTAKE:
+		stakeMap.ReduceStake(pubKeyHex, tx.StakeAmount)
+		matureSlot := uint64(currentSlot) + UnstakeDelaySlots
+		unstakeQueue.Enqueue(pubKeyHex, tx.StakeAmount, matureSlot)
+
+	case EQUIVOCATION_PROOF:
+		if len(tx.EquivBlockA) == 0 {
+			return
+		}
+		blockA := DeserializeBlock(tx.EquivBlockA)
+		if blockA == nil {
+			return
+		}
+		offenderHex := hex.EncodeToString(blockA.SlotLeader)
+		offenseKey := fmt.Sprintf("%d:%s", blockA.Index, offenderHex)
+		if slashedEvidence[offenseKey] {
+			return
+		}
+		totalSlashable := stakeMap.GetStake(offenderHex) + unstakeQueue.GetPendingStake(offenderHex)
+		slashAmount := ComputeSlashAmount(totalSlashable, SlashingPercent)
+		stakedNow := stakeMap.GetStake(offenderHex)
+		if slashAmount <= stakedNow {
+			stakeMap.ReduceStake(offenderHex, slashAmount)
+		} else {
+			stakeMap.ReduceStake(offenderHex, stakedNow)
+			unstakeQueue.BurnPending(offenderHex, slashAmount-stakedNow)
+		}
+		slashedEvidence[offenseKey] = true
+	}
 }
 
 // ApplyDomainMutations processes domain-state effects and the BUY price transfer.
-func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexer,
-	currentSlot int64, txIndex int, slotsPerDay int64) error {
+func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexer, cs CommitStorer,
+	currentSlot int64, blockIndex int64, txIndex int, slotsPerDay int64) error {
 
 	pubKeyHex := hex.EncodeToString(tx.OwnerKey)
 
@@ -49,6 +101,51 @@ func ApplyDomainMutations(tx Transaction, ledger *BalanceLedger, im DomainIndexe
 		}
 		im.Add(tx.DomainName, &tx, currentSlot, txIndex, slotsPerDay)
 		im.SetOwner(tx.DomainName, tx.OwnerKey)
+
+	case COMMIT:
+		if cs != nil {
+			commitHex := hex.EncodeToString(tx.CommitHash)
+			cs.AddCommit(&CommitRecord{
+				CommitHash:  tx.CommitHash,
+				CommitterPK: tx.OwnerKey,
+				CommitBlock: blockIndex,
+				CommitSlot:  currentSlot,
+				CommitTID:   tx.TID,
+				ExpiryBlock: blockIndex + CommitMaxWindow,
+			})
+			log.Printf("[COMMIT] hash=%s.. stored at block %d", commitHex[:16], blockIndex)
+		}
+
+	case REVEAL:
+		if cs != nil {
+			// Recompute hash to get the key for consumption
+			revealData := make([]byte, 0, 24+len(tx.DomainName)+len(tx.Salt)+len(tx.OwnerKey))
+			revealData = append(revealData, IntToByteArr(int64(len(tx.DomainName)))...)
+			revealData = append(revealData, []byte(tx.DomainName)...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.Salt)))...)
+			revealData = append(revealData, tx.Salt...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.OwnerKey)))...)
+			revealData = append(revealData, tx.OwnerKey...)
+			recomputedHash := sha256.Sum256(revealData)
+			commitHex := hex.EncodeToString(recomputedHash[:])
+
+			commitRecord := cs.GetCommit(commitHex)
+			if commitRecord == nil {
+				return fmt.Errorf("REVEAL failed: no pending COMMIT for hash %s", commitHex[:16])
+			}
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx != nil {
+				phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+				if phase != "purged" {
+					return fmt.Errorf("REVEAL failed: domain %s exists in %s phase", tx.DomainName, phase)
+				}
+			}
+			im.Add(tx.DomainName, &tx, currentSlot, txIndex, slotsPerDay)
+			im.SetOwner(tx.DomainName, tx.Recipient) // end-user owns the domain
+			im.MarkAsSpent(tx.RedeemsTxID)
+			cs.ConsumeCommit(commitHex)
+			log.Printf("[REVEAL] domain=%s registered, COMMIT %s.. consumed", tx.DomainName, commitHex[:16])
+		}
 
 	case REVOKE:
 		if len(tx.OwnerKey) > 0 {

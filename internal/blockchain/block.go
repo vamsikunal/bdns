@@ -7,9 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"math/big"
-	"sort"
 	"time"
 )
 
@@ -22,13 +22,22 @@ type Block struct {
 	IndexHash          []byte
 	BalanceLedgerHash  []byte
 	MerkleRootHash     []byte
-	StakeData          map[string]int // Registry Public Key -> Stake
+	StakeData          map[string]uint64 // Registry Public Key -> Stake (snapshot for legacy compat)
 	Transactions       []Transaction
 	PrevHash           []byte
 	Hash               []byte
+	CommitStoreHash  []byte
+	StakeMapHash     []byte
+	UnstakeQueueHash []byte
+	DRGSeed          float64
 }
 
-func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte, transactions []Transaction, prevHash []byte, prevStakeData map[string]int, privateKey *ecdsa.PrivateKey) *Block {
+
+func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte, balanceLedgerHash []byte,
+	commitStoreHash []byte, transactions []Transaction, prevHash []byte,
+	stakeMapHash []byte, unstakeQueueHash []byte, stakeData map[string]uint64,
+	privateKey *ecdsa.PrivateKey) *Block {
+
 	block := &Block{
 		Index:             index,
 		Timestamp:         time.Now().Unix(),
@@ -36,36 +45,26 @@ func NewBlock(index int64, slotNumber int64, slotLeader []byte, indexHash []byte
 		SlotLeader:        slotLeader,
 		IndexHash:         indexHash,
 		BalanceLedgerHash: balanceLedgerHash,
+		CommitStoreHash:   commitStoreHash,
 		Transactions:      transactions,
 		PrevHash:          prevHash,
+		StakeMapHash:      stakeMapHash,
+		UnstakeQueueHash:  unstakeQueueHash,
+		StakeData:         stakeData,
 	}
 
 	block.MerkleRootHash = block.SetupMerkleTree()
-	block.StakeData = block.SetupStakeData(prevStakeData)
 	block.Signature = block.SignBlock(privateKey)
 	block.Hash = block.ComputeHash()
 
 	return block
 }
 
-func (b *Block) SetupStakeData(prevStakeData map[string]int) map[string]int {
-	stakeData := make(map[string]int)
-	// Copy previous stake data
-	for key, value := range prevStakeData {
-		stakeData[key] = value
-	}
-
-	// Update stake data based on transactions
-	for _, tx := range b.Transactions {
-		if tx.Type == REGISTER {
-			stakeData[hex.EncodeToString(tx.OwnerKey)]++ // Increase stake for new domain registration
-		} else if tx.Type == REVOKE {
-			stakeData[hex.EncodeToString(tx.OwnerKey)]-- // Decrease stake for revoked domain
-		}
-	}
-
-	return stakeData
+// GetStakeSnapshot returns the current staked balances from sm as a plain map.
+func (b *Block) GetStakeSnapshot(sm StakeStorer) map[string]uint64 {
+	return sm.GetAll()
 }
+
 
 func (b *Block) SignBlock(privateKey *ecdsa.PrivateKey) []byte {
 	blockData := b.SerializeForSigning()
@@ -115,39 +114,19 @@ func (b *Block) VerifyBlock(publicKeyBytes []byte) bool {
 	return ecdsa.Verify(publicKey, hash[:], r, s)
 }
 
-func (b *Block) GetStakeDataBytes() []byte {
-	// Extract keys from the map
-	keys := make([]string, 0, len(b.StakeData))
-	for key := range b.StakeData {
-		keys = append(keys, key)
-	}
 
-	sort.Strings(keys) // Sort keys to ensure deterministic order
-
-	stakeDataBytes := []byte{}
-	for _, key := range keys {
-		value := b.StakeData[key]
-		decodedKey, _ := hex.DecodeString(key)
-		stakeDataBytes = append(stakeDataBytes, decodedKey...)
-		stakeDataBytes = append(stakeDataBytes, IntToByteArr(int64(value))...)
-	}
-
-	return stakeDataBytes
-}
-
-// Same as ComputeHash, but ommits Signature field
+// Same as ComputeHash, but omits the Signature field
 func (b *Block) SerializeForSigning() []byte {
-	stakeDataBytes := b.GetStakeDataBytes()
-
 	data := bytes.Join(
 		[][]byte{
 			IntToByteArr(b.Index),
 			IntToByteArr(b.Timestamp),
-			IntToByteArr(b.SlotNumber), // Include SlotNumber
+			IntToByteArr(b.SlotNumber),
 			b.SlotLeader,
 			b.IndexHash,
 			b.MerkleRootHash,
-			stakeDataBytes,
+			b.StakeMapHash,
+			b.UnstakeQueueHash,
 			b.PrevHash,
 		},
 		[]byte{},
@@ -157,30 +136,32 @@ func (b *Block) SerializeForSigning() []byte {
 	return hash[:]
 }
 
+
 func NewGenesisBlock(slotLeader []byte, privateKey *ecdsa.PrivateKey, registryKeys [][]byte, randomness []byte) *Block {
-	stakeData := make(map[string]int)
 	n := len(registryKeys)
 	if n == 0 {
 		log.Panic("No registries provided for genesis block")
 	}
 
-	// Initialize stakes to zero
+	stakeData := make(map[string]uint64, n)
 	for _, key := range registryKeys {
 		stakeData[hex.EncodeToString(key)] = 0
 	}
 
 	genesisBlock := Block{
-		Index:          0,
-		Timestamp:      time.Now().Unix(),
-		SlotNumber:     0,
-		SlotLeader:     slotLeader,
-		Signature:      []byte{},
-		IndexHash:      []byte{},
-		MerkleRootHash: []byte{},
-		StakeData:      stakeData,
-		Transactions:   []Transaction{},
-		PrevHash:       randomness, // Storing randomness in PrevHash field
-		Hash:           []byte{},
+		Index:            0,
+		Timestamp:        time.Now().Unix(),
+		SlotNumber:       0,
+		SlotLeader:       slotLeader,
+		Signature:        []byte{},
+		IndexHash:        []byte{},
+		MerkleRootHash:   []byte{},
+		StakeData:        stakeData,
+		Transactions:     []Transaction{},
+		PrevHash:         randomness, // Storing randomness in PrevHash field
+		Hash:             []byte{},
+		StakeMapHash:     NewStakeMap().Hash(),
+		UnstakeQueueHash: NewUnstakeQueue().Hash(),
 	}
 
 	genesisBlock.Signature = genesisBlock.SignBlock(privateKey)
@@ -190,8 +171,6 @@ func NewGenesisBlock(slotLeader []byte, privateKey *ecdsa.PrivateKey, registryKe
 }
 
 func (b *Block) ComputeHash() []byte {
-	stakeDataBytes := b.GetStakeDataBytes()
-
 	data := bytes.Join(
 		[][]byte{
 			IntToByteArr(b.Index),
@@ -201,8 +180,10 @@ func (b *Block) ComputeHash() []byte {
 			b.Signature,
 			b.IndexHash,
 			b.BalanceLedgerHash,
+			b.CommitStoreHash,
 			b.MerkleRootHash,
-			stakeDataBytes,
+			b.StakeMapHash,
+			b.UnstakeQueueHash,
 			b.PrevHash,
 		},
 		[]byte{},
@@ -284,39 +265,54 @@ func ValidateGenesisBlock(block *Block, registryKeys [][]byte, slotLeaderKey []b
 
 func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	ledger *BalanceLedger, im DomainIndexer, expiryChecker ExpiryChecker,
-	slotsPerDay int64) (*BalanceLedger, bool) {
+	slotsPerDay int64, stakeMap StakeStorer, unstakeQueue *UnstakeQueue,
+	slashedEvidence map[string]bool, cs *CommitStore) (*BalanceLedger, StakeStorer, *UnstakeQueue, map[string]bool, *CommitOverlay, bool) {
 
 	if oldBlock.Index+1 != newBlock.Index {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if newBlock.SlotNumber <= oldBlock.SlotNumber {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(oldBlock.Hash, newBlock.PrevHash) {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.SlotLeader, slotLeaderKey) {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !newBlock.VerifyBlock(slotLeaderKey) {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.MerkleRootHash, newBlock.SetupMerkleTree()) {
-		return nil, false
-	}
-
-	if !areStakesEqual(newBlock.StakeData, newBlock.SetupStakeData(oldBlock.StakeData)) {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	if !bytes.Equal(newBlock.Hash, newBlock.ComputeHash()) {
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
+
+	// Staging clones — mutations stay isolated until the block is accepted
+	stagingStake := stakeMap.Clone()
+	stagingQueue := unstakeQueue.Clone()
+	stagingSlashed := make(map[string]bool, len(slashedEvidence))
+	for k, v := range slashedEvidence {
+		stagingSlashed[k] = v
+	}
+
+	// CommitOverlay logic
+	var commitOverlay *CommitOverlay
+	if cs != nil {
+		commitOverlay = NewCommitOverlay(cs.ExportPending(), newBlock.Index)
+		commitOverlay.PurgeExpired(newBlock.Index)
+	}
+
+	// Mature any queued unstakes before processing this block's transactions
+	stagingQueue.SweepMature(uint64(newBlock.SlotNumber))
 
 	// Purge-slot revocation check
 	if expiryChecker != nil {
@@ -345,16 +341,17 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 			}
 			if !found {
 				log.Println("Block missing required purge:", expected.DomainName, "TID:", expected.TID)
-				return nil, false
+				return nil, nil, nil, nil, nil, false
 			}
 		}
 	}
 
 	// 3-gate re-check: malicious leader may bypass mempool
-	if !ValidateTransactions(newBlock.Transactions, ledger, im,
-		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader) {
+	if !ValidateTransactions(newBlock.Transactions, ledger, im, commitOverlay,
+		newBlock.SlotNumber, slotsPerDay, true, newBlock.SlotLeader, newBlock.Index,
+		stakeMap, unstakeQueue, slashedEvidence) {
 		log.Printf("ValidateBlock: ValidateTransactions failed — block rejected")
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// nonce + fee on staging clone
@@ -371,31 +368,52 @@ func ValidateBlock(newBlock *Block, oldBlock *Block, slotLeaderKey []byte,
 	}
 	if !bytes.Equal(newBlock.BalanceLedgerHash, staging.Hash()) {
 		log.Printf("ValidateBlock: BalanceLedgerHash mismatch — block rejected")
-		return nil, false
+		return nil, nil, nil, nil, nil, false
 	}
 
 	// domain mutations on overlay
 	for i, tx := range newBlock.Transactions {
-		ApplyDomainMutations(tx, staging, im, newBlock.SlotNumber, i, slotsPerDay)
+		ApplyDomainMutations(tx, staging, im, commitOverlay, newBlock.SlotNumber, newBlock.Index, i, slotsPerDay)
 	}
 	if !bytes.Equal(newBlock.IndexHash, im.GetIndexHash()) {
 		log.Printf("ValidateBlock: IndexHash mismatch — block rejected")
-		return nil, false
+		return nil, nil, nil, nil, nil, false
+	}
+	
+	if commitOverlay != nil && !bytes.Equal(newBlock.CommitStoreHash, commitOverlay.Hash()) {
+		log.Printf("ValidateBlock: CommitStoreHash mismatch — block rejected")
+		return nil, nil, nil, nil, nil, false
 	}
 
-	// commit overlay to real state
+	// Apply stake mutations to staging clones (mirror what the leader does)
+	for _, tx := range newBlock.Transactions {
+		ApplyStakeMutations(tx, stagingStake, stagingQueue, stagingSlashed, newBlock.SlotNumber)
+	}
+
+	// Verify stake hashes match the staging state after all mutations
+	if !bytes.Equal(newBlock.StakeMapHash, stagingStake.Hash()) {
+		log.Printf("ValidateBlock: StakeMapHash mismatch — block rejected")
+		return nil, nil, nil, nil, nil, false
+	}
+	if !bytes.Equal(newBlock.UnstakeQueueHash, stagingQueue.Hash()) {
+		log.Printf("ValidateBlock: UnstakeQueueHash mismatch — block rejected")
+		return nil, nil, nil, nil, nil, false
+	}
+
+	// commit domain overlay to real state
 	im.Commit()
 
-	return staging, true
+	return staging, stagingStake, stagingQueue, stagingSlashed, commitOverlay, true
 }
 
 // ValidateTransactions implements the 3-gate validation model.
 // Gate 1: Signature + spent check + structural guards
 // Gate 2: Balance sufficiency (running shadow balance)
 // Gate 3: Nonce sequential equality
-func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainIndexer,
+func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainIndexer, cs CommitStorer,
 	currentSlot int64, slotsPerDay int64,
-	isBlockValidation bool, slotLeader []byte) bool {
+	isBlockValidation bool, slotLeader []byte, blockIndex int64,
+	stakeMap StakeStorer, unstakeQueue *UnstakeQueue, slashedEvidence map[string]bool) bool {
 
 	shadowNonce := make(map[string]uint64)
 	shadowBalance := make(map[string]uint64)
@@ -404,6 +422,11 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 	shadowRegistered := make(map[string]bool)
 	shadowOwner := make(map[string]string)
 	shadowTx := make(map[int]*Transaction)
+	shadowStake := make(map[string]uint64)        // intra-block stake mutations
+	shadowPendingStake := make(map[string]uint64) // UNSTAKE coins queued this block
+	shadowQueueBurn := make(map[string]uint64)    // queue burns from equivocation this block
+	slashedEquivocations := make(map[string]bool) // offense keys seen this block
+	shadowCommit := make(map[string]bool)
 
 	for _, tx := range txs {
 		// Gate 1: Signature verification
@@ -414,8 +437,61 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			}
 		}
 
-		// Gate 1.5: RedeemsTxID double-spend check
-		if tx.RedeemsTxID != 0 && (tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE) {
+		// Gate 1.5p: PoS field hygiene
+		switch tx.Type {
+		case STAKE, UNSTAKE:
+			if tx.DomainName != "" || len(tx.Records) > 0 || tx.RedeemsTxID != 0 || len(tx.Recipient) > 0 {
+				log.Printf("ValidateTransactions: %d rejected — legacy fields must be empty", tx.Type)
+				return false
+			}
+			if len(tx.EquivBlockA) > 0 || len(tx.EquivBlockB) > 0 {
+				log.Printf("ValidateTransactions: %d rejected — equivocation fields must be empty", tx.Type)
+				return false
+			}
+		case EQUIVOCATION_PROOF:
+			if tx.DomainName != "" || len(tx.Records) > 0 || tx.RedeemsTxID != 0 || len(tx.Recipient) > 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — legacy fields must be empty")
+				return false
+			}
+			if tx.StakeAmount != 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — StakeAmount must be 0")
+				return false
+			}
+		}
+
+		// Gate 1.5q: Inverse hygiene — legacy types must not carry PoS fields
+		switch tx.Type {
+		case REGISTER, UPDATE, REVOKE, RENEW, LIST, BUY, TRANSFER, DELIST, FUND, COMMIT, REVEAL:
+			if tx.StakeAmount != 0 {
+				log.Printf("ValidateTransactions: %d rejected — StakeAmount must be 0", tx.Type)
+				return false
+			}
+			if len(tx.EquivBlockA) > 0 || len(tx.EquivBlockB) > 0 {
+				log.Printf("ValidateTransactions: %d rejected — equivocation fields must be empty", tx.Type)
+				return false
+			}
+		}
+
+		// Gate 1.5r: REGISTER is deprecated — use COMMIT→REVEAL
+		if tx.Type == REGISTER {
+			log.Printf("REGISTER rejected (use COMMIT→REVEAL), TID=%d", tx.TID)
+			return false
+		}
+
+		// Gate 1.5s: CommitHash and Salt must be empty for non-COMMIT/REVEAL types
+		if tx.Type != COMMIT && tx.Type != REVEAL {
+			if len(tx.CommitHash) > 0 {
+				log.Printf("CommitHash must be empty for type %d, TID=%d", tx.Type, tx.TID)
+				return false
+			}
+			if len(tx.Salt) > 0 {
+				log.Printf("Salt must be empty for type %d, TID=%d", tx.Type, tx.TID)
+				return false
+			}
+		}
+
+		// Gate 1.5: RedeemsTxID double-spend check (REVEAL included for defense-in-depth)
+		if tx.RedeemsTxID != 0 && (tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE || tx.Type == REVEAL) {
 			if shadowSpent[tx.RedeemsTxID] {
 				log.Printf("ValidateTransactions: RedeemsTxID %d already spent in this block",
 					tx.RedeemsTxID)
@@ -427,8 +503,8 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 				return false
 			}
 
-			// Gate 1.5h: Domain-affinity check
-			if tx.Type != REGISTER {
+			// Gate 1.5h: Domain-affinity check (skip for REVEAL — COMMIT lives in CommitStore)
+			if tx.Type != REGISTER && tx.Type != REVEAL {
 				redeemsTx, inShadow := shadowTx[tx.RedeemsTxID]
 				if !inShadow {
 					redeemsTx = im.GetTxByID(tx.RedeemsTxID)
@@ -477,6 +553,44 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			return false
 		}
 
+		// Gate 1.5c-commit: COMMIT structural checks
+		if tx.Type == COMMIT {
+			if !IsRegistryKey(tx.OwnerKey) {
+				log.Printf("ValidateTransactions(Commit): Not TrustedRegistry, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.CommitHash) != 32 {
+				log.Printf("ValidateTransactions(Commit): Invalid CommitHash length %d, TID=%d", len(tx.CommitHash), tx.TID)
+				return false
+			}
+			if tx.DomainName != "" {
+				log.Printf("ValidateTransactions(Commit): DomainName must be blank, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.Records) > 0 {
+				log.Printf("ValidateTransactions(Commit): Records must be empty, TID=%d", tx.TID)
+				return false
+			}
+			if tx.RedeemsTxID != 0 {
+				log.Printf("ValidateTransactions(Commit): RedeemsTxID must be 0, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.Salt) > 0 {
+				log.Printf("ValidateTransactions(Commit): Salt must be blank, TID=%d", tx.TID)
+				return false
+			}
+			commitHex := hex.EncodeToString(tx.CommitHash)
+			if shadowCommit[commitHex] {
+				log.Printf("ValidateTransactions(Commit): Duplicate hash in block, TID=%d", tx.TID)
+				return false
+			}
+			if cs != nil && cs.GetCommit(commitHex) != nil {
+				log.Printf("ValidateTransactions(Commit): Hash already pending, TID=%d", tx.TID)
+				return false
+			}
+			shadowCommit[commitHex] = true
+		}
+
 		// Gate 1.5e: Domain lifecycle phase check for secondary market ops
 		if tx.Type == LIST || tx.Type == DELIST || tx.Type == BUY || tx.Type == TRANSFER {
 			existingTx := im.GetDomain(tx.DomainName)
@@ -507,6 +621,11 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 				}
 				if !VerifySignature(slotLeader, &tx) {
 					log.Printf("ValidateTransactions: auto-REVOKE not signed by slot leader")
+					return false
+				}
+				// Defense: reject auto-REVOKE for domains registered in this block
+				if shadowRegistered[tx.DomainName] {
+					log.Printf("ValidateTransactions: auto-REVOKE rejected — %s registered in this block", tx.DomainName)
 					return false
 				}
 				continue
@@ -762,6 +881,82 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			shadowOwner[tx.DomainName] = pubKeyHex
 		}
 
+		// REVEAL: 7-gate pipeline
+		if tx.Type == REVEAL {
+			if !IsRegistryKey(tx.OwnerKey) {
+				log.Printf("ValidateTransactions: REVEAL rejected — not TrustedRegistry, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.CommitHash) > 0 {
+				log.Printf("ValidateTransactions: REVEAL rejected — CommitHash must be empty, TID=%d", tx.TID)
+				return false
+			}
+			if len(tx.Recipient) == 0 {
+				log.Printf("ValidateTransactions: REVEAL rejected — Recipient required, TID=%d", tx.TID)
+				return false
+			}
+			// Recompute hash using length-prefixed fields
+			revealData := make([]byte, 0, 24+len(tx.DomainName)+len(tx.Salt)+len(tx.OwnerKey))
+			revealData = append(revealData, IntToByteArr(int64(len(tx.DomainName)))...)
+			revealData = append(revealData, []byte(tx.DomainName)...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.Salt)))...)
+			revealData = append(revealData, tx.Salt...)
+			revealData = append(revealData, IntToByteArr(int64(len(tx.OwnerKey)))...)
+			revealData = append(revealData, tx.OwnerKey...)
+			recomputedHash := sha256.Sum256(revealData)
+			commitHex := hex.EncodeToString(recomputedHash[:])
+			// Gate R1: hash match
+			var commitRecord *CommitRecord
+			if cs != nil {
+				commitRecord = cs.GetCommit(commitHex)
+			}
+			if commitRecord == nil || shadowCommit[commitHex] {
+				log.Printf("ValidateTransactions: REVEAL gate R1 — no pending COMMIT for hash %s, TID=%d", commitHex[:16], tx.TID)
+				return false
+			}
+			// Gate R1b: TID binding
+			if tx.RedeemsTxID != commitRecord.CommitTID {
+				log.Printf("ValidateTransactions: REVEAL gate R1b — TID mismatch, TID=%d", tx.TID)
+				return false
+			}
+			// Gate R2: PubKey binding
+			if !bytes.Equal(tx.OwnerKey, commitRecord.CommitterPK) {
+				log.Printf("ValidateTransactions: REVEAL gate R2 — PubKey mismatch, TID=%d", tx.TID)
+				return false
+			}
+			// Gate R3: minimum delay (slot-based, not block-based, because leaders
+			// skip empty blocks so block index may not advance between COMMIT and REVEAL)
+			slotsSinceCommit := currentSlot - commitRecord.CommitSlot
+			if slotsSinceCommit < CommitMinDelay {
+				log.Printf("ValidateTransactions: REVEAL gate R3 — premature (%d slots, need %d), TID=%d", slotsSinceCommit, CommitMinDelay, tx.TID)
+				return false
+			}
+			// Gate R4: domain availability
+			if shadowRegistered[tx.DomainName] {
+				log.Printf("ValidateTransactions: REVEAL gate R4 — domain %s already registered in block, TID=%d", tx.DomainName, tx.TID)
+				return false
+			}
+			existingTx := im.GetDomain(tx.DomainName)
+			if existingTx != nil {
+				phase := GetDomainPhase(currentSlot, existingTx.ExpirySlot, slotsPerDay)
+				if phase != "purged" {
+					log.Printf("ValidateTransactions: REVEAL gate R4 — domain %s in %s phase, TID=%d", tx.DomainName, phase, tx.TID)
+					return false
+				}
+				// Gate R4b: COMMIT must post-date purge
+				purgeSlot := ComputePurgeSlot(existingTx.ExpirySlot, slotsPerDay)
+				if commitRecord.CommitSlot < purgeSlot {
+					log.Printf("ValidateTransactions: REVEAL gate R4b — COMMIT predates purge, TID=%d", tx.TID)
+					return false
+				}
+			}
+			// All gates passed — mark consumed
+			shadowCommit[commitHex] = true
+			shadowRegistered[tx.DomainName] = true
+			// Shadow owner is the Recipient (end-user), not the Registry
+			shadowOwner[tx.DomainName] = hex.EncodeToString(tx.Recipient)
+		}
+
 		// TRANSFER: ownership check + shadow update
 		if tx.Type == TRANSFER {
 			currentOwner := ""
@@ -785,12 +980,130 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			shadowOwner[tx.DomainName] = pubKeyHex
 		}
 
+		// Gate 3.5: STAKE validation
+		if tx.Type == STAKE {
+			if tx.StakeAmount == 0 {
+				log.Printf("ValidateTransactions: STAKE rejected — StakeAmount must be > 0")
+				return false
+			}
+			currentStake := stakeMap.GetStake(pubKeyHex)
+			if s, ok := shadowStake[pubKeyHex]; ok {
+				currentStake = s
+			}
+			if currentStake == 0 && tx.StakeAmount < MinStakeThreshold {
+				log.Printf("ValidateTransactions: STAKE rejected — first stake %d below minimum %d",
+					tx.StakeAmount, MinStakeThreshold)
+				return false
+			}
+			if tx.Fee+tx.StakeAmount < tx.Fee {
+				log.Printf("ValidateTransactions: STAKE rejected — fee + StakeAmount overflows uint64")
+				return false
+			}
+			if runningBalance < tx.StakeAmount {
+				log.Printf("ValidateTransactions: STAKE rejected — %s has %d after fee, needs %d",
+					pubKeyHex[:8], runningBalance, tx.StakeAmount)
+				return false
+			}
+			runningBalance -= tx.StakeAmount
+			shadowStake[pubKeyHex] = currentStake + tx.StakeAmount
+		}
+
+		// Gate 3.5: UNSTAKE validation
+		if tx.Type == UNSTAKE {
+			if tx.StakeAmount == 0 {
+				log.Printf("ValidateTransactions: UNSTAKE rejected — StakeAmount must be > 0")
+				return false
+			}
+			currentStake := stakeMap.GetStake(pubKeyHex)
+			if s, ok := shadowStake[pubKeyHex]; ok {
+				currentStake = s
+			}
+			if currentStake < tx.StakeAmount {
+				log.Printf("ValidateTransactions: UNSTAKE rejected — stake %d < requested %d",
+					currentStake, tx.StakeAmount)
+				return false
+			}
+			remaining := currentStake - tx.StakeAmount
+			if remaining > 0 && remaining < MinStakeThreshold {
+				log.Printf("ValidateTransactions: UNSTAKE rejected — remaining stake %d below minimum %d",
+					remaining, MinStakeThreshold)
+				return false
+			}
+			shadowStake[pubKeyHex] = remaining
+			shadowPendingStake[pubKeyHex] += tx.StakeAmount
+		}
+
+		// Gate 3.5: EQUIVOCATION_PROOF validation
+		if tx.Type == EQUIVOCATION_PROOF {
+			if len(tx.EquivBlockA) == 0 || len(tx.EquivBlockB) == 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — missing evidence")
+				return false
+			}
+			if len(tx.EquivBlockA) > MaxEvidenceBlockBytes || len(tx.EquivBlockB) > MaxEvidenceBlockBytes {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — evidence exceeds size limit")
+				return false
+			}
+			blockA := DeserializeBlock(tx.EquivBlockA)
+			blockB := DeserializeBlock(tx.EquivBlockB)
+			if blockA == nil || blockB == nil {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — cannot deserialize evidence")
+				return false
+			}
+			offenderHex := hex.EncodeToString(blockA.SlotLeader)
+			if blockA.Index != blockB.Index {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — blocks at different heights")
+				return false
+			}
+			if offenderHex != hex.EncodeToString(blockB.SlotLeader) {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — different slot leaders")
+				return false
+			}
+			if bytes.Equal(blockA.Hash, blockB.Hash) {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — identical block hashes")
+				return false
+			}
+			if !blockA.VerifyBlock(blockA.SlotLeader) || !blockB.VerifyBlock(blockB.SlotLeader) {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — invalid block signature")
+				return false
+			}
+			offenseKey := fmt.Sprintf("%d:%s", blockA.Index, offenderHex)
+			if slashedEvidence[offenseKey] || slashedEquivocations[offenseKey] {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — offense already recorded")
+				return false
+			}
+			stakePart := stakeMap.GetStake(offenderHex)
+			if s, ok := shadowStake[offenderHex]; ok {
+				stakePart = s
+			}
+			queuePart := unstakeQueue.GetPendingStake(offenderHex) + shadowPendingStake[offenderHex] - shadowQueueBurn[offenderHex]
+			totalSlashable := stakePart + queuePart
+			if totalSlashable == 0 {
+				log.Printf("ValidateTransactions: EQUIVOCATION_PROOF rejected — no slashable stake")
+				return false
+			}
+			slashAmount := ComputeSlashAmount(totalSlashable, SlashingPercent)
+			if slashAmount <= stakePart {
+				shadowStake[offenderHex] = stakePart - slashAmount
+			} else {
+				shadowStake[offenderHex] = 0
+				excess := slashAmount - stakePart
+				shadowQueueBurn[offenderHex] += excess
+				if shadowPendingStake[offenderHex] > excess {
+					shadowPendingStake[offenderHex] -= excess
+				} else {
+					shadowPendingStake[offenderHex] = 0
+				}
+			}
+			slashedEquivocations[offenseKey] = true
+		}
+
 		// Update running shadow state
 		shadowNonce[pubKeyHex] = currentNonce + 1
 		shadowBalance[pubKeyHex] = runningBalance
 
-		// Populate shadowTx for state-mutating ops (same-block provenance chaining)
-		if tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE {
+		// Populate shadowTx for state-mutating ops
+		if tx.Type == REGISTER || tx.Type == UPDATE || tx.Type == RENEW || tx.Type == REVOKE ||
+			tx.Type == COMMIT || tx.Type == REVEAL {
 			txCopy := tx
 			shadowTx[tx.TID] = &txCopy
 		}

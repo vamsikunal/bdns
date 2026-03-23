@@ -22,3 +22,24 @@ type DomainIndexer interface {
 	IsSpent(txID int) bool
 	Commit()
 }
+
+// StakeStorer abstracts staked-balance operations for block validation.
+type StakeStorer interface {
+	AddStake(validatorHex string, amount uint64)
+	ReduceStake(validatorHex string, amount uint64)
+	GetStake(validatorHex string) uint64
+	GetAll() map[string]uint64
+	HasAnyStake() bool
+	Hash() []byte
+	Clone() StakeStorer
+}
+
+// CommitStorer abstracts the pending commits store for validation.
+type CommitStorer interface {
+	AddCommit(record *CommitRecord)
+	GetCommit(commitHashHex string) *CommitRecord
+	ConsumeCommit(commitHashHex string)
+	PurgeExpired(currentBlockIndex int64) int
+	Hash() []byte
+}
+

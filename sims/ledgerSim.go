@@ -28,6 +28,24 @@ func LedgerSim() {
 	fmt.Println("=== Ledger Sim: waiting for genesis block ===")
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
 
+	// STAKE phase: Each node STAKEs coins to become eligible for leader election
+	fmt.Println("[LedgerSim] Issuing STAKE transactions...")
+	for i, node := range nodes {
+		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		nonce := node.BalanceLedger.GetNonce(pubKeyHex)
+
+		stakeTx := blockchain.NewStakeTransaction(10000,
+			node.KeyPair.PublicKey, &node.KeyPair.PrivateKey,
+			1, nonce, node.TransactionPool)
+
+		node.BroadcastTransaction(*stakeTx)
+		fmt.Printf("[STAKE] node%d staked 10000 coins\n", i+1)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	fmt.Println("[LedgerSim] Waiting for STAKEs to be mined...")
+	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*3) * time.Second)
+
 	// Node aliases
 	nodeA := nodes[0] // TrustedRegistry — registers, lists, delists
 	nodeB := nodes[2] // TrustedRegistry — receives FUND + BUY
@@ -47,15 +65,27 @@ func LedgerSim() {
 	balABefore := getBal(nodeA, pubA)
 	fmt.Printf("[INFO] NodeA starting balance: %d\n", balABefore)
 
-	// Register the primary test domain
+	// Register the primary test domain via COMMIT→REVEAL
 	fmt.Println("\n=== Ledger Sim: Fee & Nonce Tests ===")
 	nonceA := getNonce(nodeA)
-	txReg := blockchain.NewTransaction(blockchain.REGISTER, "ledger-test.bdns",
-		[]blockchain.Record{{Type: "A", Value: "10.0.0.1", Priority: 0}},
-		3600, 0, slotsPerDay, 0,
-		nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey, nodeA.TransactionPool, fee, nonceA)
+	primaryRecords := []blockchain.Record{{Type: "A", Value: "10.0.0.1", Priority: 0}}
+	primarySalt := []byte("ledger-test-salt-1")
+	commitPrimary := blockchain.NewCommitTransaction("ledger-test.bdns",
+		primarySalt, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
+	nodeA.BroadcastTransaction(*commitPrimary)
+	fmt.Printf("[COMMIT] ledger-test.bdns, fee=%d nonce=%d\n", fee, nonceA)
+
+	waitBlocks(slotInterval, slotsPerEpoch, int(blockchain.CommitMinDelay)+1)
+
+	nonceA = getNonce(nodeA)
+	nextBlock := nodeA.Blockchain.GetLatestBlock().Index + 1
+	txReg := blockchain.NewRevealTransaction("ledger-test.bdns", primarySalt, primaryRecords,
+		3600, nextBlock, slotsPerDay, commitPrimary.TID,
+		nodeA.KeyPair.PublicKey, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
 	nodeA.BroadcastTransaction(*txReg)
-	fmt.Printf("[REGISTER] ledger-test.bdns — A record, fee=%d nonce=%d\n", fee, nonceA)
+	fmt.Printf("[REVEAL] ledger-test.bdns — A record, fee=%d nonce=%d\n", fee, nonceA)
 
 	waitBlocks(slotInterval, slotsPerEpoch, 2)
 
@@ -92,18 +122,40 @@ func LedgerSim() {
 
 	// Sequential nonces — register two more domains back-to-back
 	nonceA = getNonce(nodeA)
-	tx2a := blockchain.NewTransaction(blockchain.REGISTER, "seq1.bdns",
-		[]blockchain.Record{{Type: "A", Value: "10.0.0.2", Priority: 0}},
-		3600, 0, slotsPerDay, 0,
-		nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey, nodeA.TransactionPool, fee, nonceA)
-	nodeA.BroadcastTransaction(*tx2a)
+	seq1Salt := []byte("seq1-salt")
+	seq1Commit := blockchain.NewCommitTransaction("seq1.bdns",
+		seq1Salt, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
+	nodeA.BroadcastTransaction(*seq1Commit)
+	nonceA++
 
-	tx2b := blockchain.NewTransaction(blockchain.REGISTER, "seq2.bdns",
+	seq2Salt := []byte("seq2-salt")
+	seq2Commit := blockchain.NewCommitTransaction("seq2.bdns",
+		seq2Salt, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
+	nodeA.BroadcastTransaction(*seq2Commit)
+	fmt.Printf("[COMMIT] seq1.bdns nonce=%d, seq2.bdns nonce=%d\n", getNonce(nodeA)-2, getNonce(nodeA)-1)
+
+	waitBlocks(slotInterval, slotsPerEpoch, int(blockchain.CommitMinDelay)+2)
+
+	nonceA = getNonce(nodeA)
+	nextBlock = nodeA.Blockchain.GetLatestBlock().Index + 1
+	tx2a := blockchain.NewRevealTransaction("seq1.bdns", seq1Salt,
+		[]blockchain.Record{{Type: "A", Value: "10.0.0.2", Priority: 0}},
+		3600, nextBlock, slotsPerDay, seq1Commit.TID,
+		nodeA.KeyPair.PublicKey, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
+	nodeA.BroadcastTransaction(*tx2a)
+	nonceA++
+
+	nextBlock = nodeA.Blockchain.GetLatestBlock().Index + 1
+	tx2b := blockchain.NewRevealTransaction("seq2.bdns", seq2Salt,
 		[]blockchain.Record{{Type: "A", Value: "10.0.0.3", Priority: 0}},
-		3600, 0, slotsPerDay, 0,
-		nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey, nodeA.TransactionPool, fee, nonceA+1)
+		3600, nextBlock, slotsPerDay, seq2Commit.TID,
+		nodeA.KeyPair.PublicKey, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
 	nodeA.BroadcastTransaction(*tx2b)
-	fmt.Printf("[REGISTER] seq1.bdns nonce=%d, seq2.bdns nonce=%d\n", nonceA, nonceA+1)
+	fmt.Printf("[REVEAL] seq1.bdns + seq2.bdns\n")
 
 	waitBlocks(slotInterval, slotsPerEpoch, 2)
 
@@ -451,15 +503,26 @@ func LedgerSim() {
 		fmt.Println("FAIL  [DELIST] — domain not indexed")
 	}
 
-	// RENEW — register a fresh domain, then renew it
 	fmt.Println("\n=== Ledger Sim: RENEW Tests ===")
 	nonceA = getNonce(nodeA)
-	txFresh := blockchain.NewTransaction(blockchain.REGISTER, "renew-ledger.bdns",
+	renewSalt := []byte("renew-ledger-salt")
+	renewCommit := blockchain.NewCommitTransaction("renew-ledger.bdns",
+		renewSalt, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
+	nodeA.BroadcastTransaction(*renewCommit)
+	fmt.Println("[COMMIT] renew-ledger.bdns")
+
+	waitBlocks(slotInterval, slotsPerEpoch, int(blockchain.CommitMinDelay)+1)
+
+	nonceA = getNonce(nodeA)
+	nextBlock = nodeA.Blockchain.GetLatestBlock().Index + 1
+	txFresh := blockchain.NewRevealTransaction("renew-ledger.bdns", renewSalt,
 		[]blockchain.Record{{Type: "A", Value: "10.0.0.50", Priority: 0}},
-		3600, 0, slotsPerDay, 0,
-		nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey, nodeA.TransactionPool, fee, nonceA)
+		3600, nextBlock, slotsPerDay, renewCommit.TID,
+		nodeA.KeyPair.PublicKey, nodeA.KeyPair.PublicKey, &nodeA.KeyPair.PrivateKey,
+		fee, nonceA, nodeA.TransactionPool)
 	nodeA.BroadcastTransaction(*txFresh)
-	fmt.Println("[REGISTER] renew-ledger.bdns — A record (will be renewed)")
+	fmt.Println("[REVEAL] renew-ledger.bdns")
 
 	waitBlocks(slotInterval, slotsPerEpoch, 2)
 

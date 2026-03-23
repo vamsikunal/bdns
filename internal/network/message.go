@@ -22,6 +22,8 @@ const (
 	MsgDNSQuery      MessageType = "DNS_QUERY"
 	MsgDNSProof      MessageType = "DNS_PROOF"
 	MsgMerkleProof   MessageType = "MERKLE_PROOF"
+	MsgCommitment    MessageType = "DRG_COMMITMENT"
+	MsgReveal        MessageType = "DRG_REVEAL"
 )
 
 // Message represents a generic network message
@@ -42,4 +44,21 @@ func DecodeMessage(data []byte) (*Message, error) {
 	var msg Message
 	err := json.Unmarshal(data, &msg)
 	return &msg, err
+}
+
+// CommitmentMsg is broadcast in the commitment phase of the DRG protocol.
+type CommitmentMsg struct {
+	Epoch      int64  `json:"epoch"`
+	Commitment []byte `json:"commitment"`
+	Sender     string `json:"sender"`
+	Signature  []byte `json:"signature"`
+}
+
+// RevealMsg is broadcast in the reveal phase of the DRG protocol.
+type RevealMsg struct {
+	Epoch     int64  `json:"epoch"`
+	U         []byte `json:"u"`
+	R         []byte `json:"r"`
+	Sender    string `json:"sender"`
+	Signature []byte `json:"signature"`
 }
