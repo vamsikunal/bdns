@@ -51,6 +51,8 @@ type Node struct {
 	PeerID          string
 	KnownFullPeers  []string
 	HeaderChain     []blockchain.BlockHeader // Light nodes store only headers
+	GatewayServer   interface{}              // Full node gRPC server
+	ConnectionPool  interface{}              // Light node gRPC connection pool
 	cancel          context.CancelFunc       // cancels CreateBlockIfLeader goroutine
 	dnsConn         *net.UDPConn             // DNS server listener; closed by NodesCleanup
 	BalanceLedger   *blockchain.BalanceLedger
