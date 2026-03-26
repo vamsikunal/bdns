@@ -72,6 +72,10 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		}
 	}
 	n.BcMutex.Unlock()
+
+	if !n.IsFullNode {
+		n.AddBlockHeader(block.Header())
+	}
 }
 
 func (n *Node) AddTransaction(tx *blockchain.Transaction) {
