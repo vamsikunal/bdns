@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
+	"github.com/bleasey/bdns/internal/gateway"
 	"github.com/bleasey/bdns/internal/index"
 )
+
 
 func copyStringBoolMap(src map[string]bool) map[string]bool {
 	dst := make(map[string]bool, len(src))
@@ -327,3 +329,20 @@ func (n *Node) waitForHeader(index int64, timeout time.Duration) *blockchain.Blo
 		time.Sleep(pollInterval)
 	}
 }
+
+// VerifyNXDOMAIN confirms domain absence via TOFU consensus across healthy full nodes.
+func (n *Node) VerifyNXDOMAIN(domain string) bool {
+	if n.ConnectionPool == nil {
+		return false
+	}
+	pool, ok := n.ConnectionPool.(*gateway.ConnectionPool)
+	if !ok {
+		return false
+	}
+	if pool.GetHealthyCount() < 2 {
+		return false
+	}
+	_, err := pool.QueryWithFailover(domain, 0)
+	return err != nil
+}
+
