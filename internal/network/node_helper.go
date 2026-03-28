@@ -9,7 +9,9 @@ import (
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/gateway"
 	"github.com/bleasey/bdns/internal/index"
+	pb "github.com/bleasey/bdns/internal/proto/gatwaypb"
 )
+
 
 
 func copyStringBoolMap(src map[string]bool) map[string]bool {
@@ -237,14 +239,14 @@ func (n *Node) HandleDNSQuery(sender string, query DNSQueryMsg) {
 		n.TxMutex.Unlock()
 		log.Printf("[DNS_QUERY] Domain %s is in %s phase, not serving proof\n", query.DomainName, phase)
 		return
-	}
+	}// Waits for the block header, validates the Merkle proof, and checks K-confirmations.
 
 	loc := n.IndexManager.GetTxLocation(query.DomainName)
 	n.TxMutex.Unlock()
 
 	if loc == nil {
 		return
-	}
+	}// Waits for the block header, validates the Merkle proof, and checks K-confirmations.
 
 	n.BcMutex.Lock()
 	block := n.Blockchain.GetBlockByIndex(loc.BlockIndex)
@@ -346,3 +348,43 @@ func (n *Node) VerifyNXDOMAIN(domain string) bool {
 	return err != nil
 }
 
+// HandleDNSProofGRPC verifies // Waits for the block header, validates the Merkle proof, and checks K-confirmations.a DNS proof delivered over gRPC by the gateway layer.
+func (n *Node) HandleDNSProofGRPC(resp *pb.DomainQueryResponse) bool {
+	if resp == nil || resp.BlockHeader == nil || resp.Proof == nil {
+		return false
+	}
+
+	header := n.waitForHeader(resp.BlockHeader.Index, 2*time.Second)
+	if header == nil {
+		log.Printf("[SPV] header %d not received within timeout", resp.BlockHeader.Index)
+		return false
+	}
+
+	if !bytes.Equal(header.Hash, resp.BlockHeader.Hash) {
+		log.Println("[SPV] block header hash mismatch")
+		return false
+	}
+
+	proof := blockchain.MerkleProof{
+		MerkleRoot: header.MerkleRoot,
+		TxHash:     resp.Proof.TxHash,
+		ProofPath:  resp.Proof.ProofPath,
+		Directions: resp.Proof.Directions,
+	}
+	if !blockchain.VerifyMerkleProof(&proof) {
+		log.Println("[SPV] Merkle proof verification failed")
+		return false
+	}
+
+	// K-confirmation depth check
+	n.BcMutex.Lock()
+	tip := n.Blockchain.GetLatestBlock().Index
+	n.BcMutex.Unlock()
+	const kConfirmations = 6
+	if tip-resp.BlockHeader.Index < kConfirmations {
+		log.Printf("[SPV] insufficient confirmations: have %d, need %d", tip-resp.BlockHeader.Index, kConfirmations)
+		return false
+	}
+
+	return true
+}
