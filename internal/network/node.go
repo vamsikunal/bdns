@@ -23,6 +23,17 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 )
 
+// headerBroadcaster is the minimal interface the node needs from GatewayServer.
+// Defined here to avoid an import cycle between network and gateway packages.
+type headerBroadcaster interface {
+	BroadcastHeader(header *blockchain.BlockHeader)
+}
+
+// poolCloser is the minimal interface the node needs from ConnectionPool.
+type poolCloser interface {
+	Close()
+}
+
 // Node represents a blockchain peer
 type Node struct {
 	Address         string
