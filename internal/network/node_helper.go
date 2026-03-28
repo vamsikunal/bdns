@@ -77,10 +77,16 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 	}
 	n.BcMutex.Unlock()
 
-	if !n.IsFullNode {
+	if n.IsFullNode {
+		if gs, ok := n.GatewayServer.(headerBroadcaster); ok {
+			header := block.Header()
+			gs.BroadcastHeader(&header)
+		}
+	} else {
 		n.AddBlockHeader(block.Header())
 	}
 }
+
 
 func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	n.TxMutex.Lock()
