@@ -13,8 +13,8 @@ import (
 
 var ErrAllPeersDown = errors.New("all full node peers unavailable")
 
-// poolClient is the subset of GatewayClient that the pool depends on
-type poolClient interface {
+// PoolClient is the subset of GatewayClient that the pool depends on
+type PoolClient interface {
 	QueryDomain(domain string, blockIndex int64) (*pb.DomainQueryResponse, error)
 	HealthCheck() (*pb.HealthCheckResponse, error)
 	Close()
@@ -23,14 +23,14 @@ type poolClient interface {
 // ConnectionPool manages connections to multiple full nodes with automatic failover
 type ConnectionPool struct {
 	mu      sync.RWMutex
-	clients []poolClient
+	clients []PoolClient
 	addrs   []string
 	health  map[int]bool
 	current int
 }
 
 // NewConnectionPool initialises a pool from pre-constructed clients.
-func NewConnectionPool(clients []poolClient, addrs []string) *ConnectionPool {
+func NewConnectionPool(clients []PoolClient, addrs []string) *ConnectionPool {
 	p := &ConnectionPool{
 		clients: clients,
 		addrs:   addrs,
@@ -73,10 +73,10 @@ func (p *ConnectionPool) QueryWithFailover(domain string, blockIndex int64) (*pb
 }
 
 // Clients returns a snapshot of the underlying pool clients
-func (p *ConnectionPool) Clients() []poolClient {
+func (p *ConnectionPool) Clients() []PoolClient {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	out := make([]poolClient, len(p.clients))
+	out := make([]PoolClient, len(p.clients))
 	copy(out, p.clients)
 	return out
 }
@@ -117,4 +117,31 @@ func (p *ConnectionPool) Close() {
 	for _, c := range p.clients {
 		c.Close()
 	}
+}
+
+// NewConnectionPoolForTest creates a ConnectionPool for testing (exports health map access)
+func NewConnectionPoolForTest(clients []PoolClient, addrs []string) *ConnectionPool {
+	p := &ConnectionPool{
+		clients: clients,
+		addrs:   addrs,
+		health:  make(map[int]bool),
+	}
+	for i := range clients {
+		p.health[i] = true
+	}
+	return p
+}
+
+// SetHealth sets the health status of a client at the given index (for testing)
+func (p *ConnectionPool) SetHealth(idx int, healthy bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.health[idx] = healthy
+}
+
+// GetHealth returns the health status of a client at the given index (for testing)
+func (p *ConnectionPool) GetHealth(idx int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.health[idx]
 }

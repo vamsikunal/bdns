@@ -34,6 +34,8 @@ func main() {
 		sims.LedgerSim()
 	case "stake":
 		sims.StakeSim()
+	case "gateway":
+		sims.GatewaySim()
 	default:
 		sims.RandSim(numNodes, txTime, simulationTime, interval, slotInterval, slotsPerEpoch, seed, txProbability, queryProbability, renewProbability)
 		if err := sims.CleanChainData(); err != nil {
