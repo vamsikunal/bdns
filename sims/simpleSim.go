@@ -8,7 +8,9 @@ import (
 
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/network"
+	"github.com/miekg/dns"
 )
+
 
 func SimpleSim() {
 	// Constants
@@ -32,9 +34,11 @@ func SimpleSim() {
 	}
 
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
+	InitGateway(nodes)
 
 	fmt.Println("Waiting for genesis block to be created...")
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
+
 
 	// Phase 1: Each node STAKEs coins to become eligible for leader election
 	fmt.Println("[SimpleSim] Issuing STAKE transactions...")
@@ -164,6 +168,25 @@ func SimpleSim() {
 	fmt.Printf("  Skipped: %d  (not yet indexed — pre-existing fork issue)\n", skip)
 	fmt.Printf("  Failed : %d\n", fail)
 
+	// UDP probe: verify at least one DNS server answers on its assigned port
+	fmt.Println("\n=== SimpleSim: UDP DNS Probe ===")
+	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue
+		}
+		port := fmt.Sprintf("127.0.0.1:%d", 5300+i)
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(domains[0]), dns.TypeA)
+		resp, err := dns.Exchange(m, port)
+		if err != nil {
+			fmt.Printf(" probe :%d → error: %v\n", 5300+i, err)
+		} else {
+			fmt.Printf(" probe :%d → rcode=%d answers=%d\n", 5300+i, resp.Rcode, len(resp.Answer))
+		}
+		break // one probe is enough for smoke-test
+	}
+
+	CloseGateway(nodes)
 	network.NodesCleanup(nodes)
 	fmt.Println("Simple simulation completed.")
 }

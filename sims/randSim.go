@@ -14,7 +14,9 @@ import (
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/bleasey/bdns/internal/network"
+	"github.com/miekg/dns"
 )
+
 
 func CleanChainData() error {
 	cwd, err := os.Getwd()
@@ -57,9 +59,11 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	var wg sync.WaitGroup
 
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
+	InitGateway(nodes)
 
 	fmt.Println("Waiting for genesis block to be created...")
 	time.Sleep(time.Duration(slotInterval) * time.Second)
+
 
 	// STAKE phase: Each node STAKEs coins to become eligible for leader election
 	fmt.Println("[RandSim] Issuing STAKE transactions...")
@@ -252,7 +256,44 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 		}(node, i)
 	}
 
+	// DNS ticker: probe the UDP DNS server once every 5 s after domains are registered
+	dnsTickStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-dnsTickStop:
+				return
+			case <-ticker.C:
+				domainsMu.Lock()
+				if len(domains) == 0 {
+					domainsMu.Unlock()
+					continue
+				}
+				d := domains[rand.Intn(len(domains))]
+				domainsMu.Unlock()
+				m := new(dns.Msg)
+				m.SetQuestion(dns.Fqdn(d), dns.TypeA)
+				if resp, err := dns.Exchange(m, "127.0.0.1:5300"); err == nil {
+					fmt.Printf("[DNS-tick] %s → rcode=%d answers=%d\n", d, resp.Rcode, len(resp.Answer))
+				}
+			}
+		}
+	}()
+
 	wg.Wait()
+	close(dnsTickStop)
+
+
+	// Log HeaderChain length for the light node (index 1)
+	for i, node := range nodes {
+		if !node.IsFullNode {
+			fmt.Printf("[RandSim] light node %d HeaderChain length: %d\n", i+1, len(node.HeaderChain))
+			break
+		}
+	}
+
 	time.Sleep(10 * time.Second) // wait until nodes are ready
 	client.RunAutoClient(domains)
 
@@ -273,6 +314,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	fmt.Printf("Queries per second: %f\n", QueriesPerSec)
 
 	metrics.PrintMetrics()
+	CloseGateway(nodes)
 	network.NodesCleanup(nodes)
 
 	if err := CleanChainData(); err != nil {

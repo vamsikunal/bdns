@@ -7,11 +7,6 @@ import (
 	"github.com/bleasey/bdns/internal/network"
 )
 
-// GatewaySim is the deterministic gateway test simulation.
-// Full implementation is in gatewaySim.go (Contributor 1).
-func GatewaySim() {
-	fmt.Println("[GatewaySim] not yet implemented")
-}
 
 
 // grpcBasePort is the starting port for full-node gRPC servers
