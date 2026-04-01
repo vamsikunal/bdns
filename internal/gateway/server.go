@@ -211,9 +211,9 @@ func (s *GatewayServer) BroadcastHeader(header *blockchain.BlockHeader) {
 	}
 }
 
-// Close performs a graceful shutdown of the gRPC server
+// Close performs a shutdown of the gRPC server
 func (s *GatewayServer) Close() {
-	s.grpcServer.GracefulStop()
+	s.grpcServer.Stop()
 }
 
 // toProtoHeader converts a blockchain.BlockHeader to its proto representation

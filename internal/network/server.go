@@ -17,6 +17,7 @@ func StartDNSServer(port string, node *Node) {
 		Net:     "udp",
 		Handler: mux,
 	}
+	node.DNSServer = srv
 
 	if err := srv.ListenAndServe(); err != nil {
 		log.Printf("[DNS] UDP server on :%s stopped: %v", port, err)

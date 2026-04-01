@@ -149,8 +149,8 @@ func NodesCleanup(nodes []*Node) {
 		}
 
 		// Close the DNS server UDP conn
-		if node.dnsConn != nil {
-			node.dnsConn.Close()
+		if node.DNSServer != nil {
+			node.DNSServer.Shutdown()
 		}
 
 		node.P2PNetwork.Close()

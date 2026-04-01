@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/bleasey/bdns/internal/index"
 	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/miekg/dns"
 )
 
 // headerBroadcaster is the minimal interface the node needs from GatewayServer.
@@ -65,7 +65,7 @@ type Node struct {
 	GatewayServer           interface{}              // Full node gRPC server
 	ConnectionPool          interface{}              // Light node gRPC connection pool
 	cancel                  context.CancelFunc       // cancels CreateBlockIfLeader goroutine
-	dnsConn                 *net.UDPConn             // DNS server listener; closed by NodesCleanup
+	DNSServer               *dns.Server              // DNS server instance; closed by NodesCleanup
 	BalanceLedger           *blockchain.BalanceLedger
 	CommitStore             *blockchain.CommitStore
 	StakeMap                blockchain.StakeStorer
