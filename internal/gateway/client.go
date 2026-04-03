@@ -25,7 +25,7 @@ type GatewayClient struct {
 }
 
 // newGatewayClient opens a connection to a single full node and starts header streaming
-func newGatewayClient(addr string) poolClient {
+func newGatewayClient(addr string) PoolClient {
 	return newGatewayClientForNode(nil, addr)
 }
 
@@ -137,7 +137,7 @@ func (c *GatewayClient) Close() {
 
 // NewConnectionPoolFromAddrs creates a ConnectionPool from a list of full node addresses.
 func NewConnectionPoolFromAddrs(node *network.Node, addrs []string) *ConnectionPool {
-	clients := make([]poolClient, len(addrs))
+	clients := make([]PoolClient, len(addrs))
 	for i, addr := range addrs {
 		clients[i] = NewGatewayClientForNode(node, addr)
 	}

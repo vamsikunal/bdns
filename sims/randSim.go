@@ -14,6 +14,7 @@ import (
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/bleasey/bdns/internal/network"
+	"github.com/miekg/dns"
 )
 
 func CleanChainData() error {
@@ -22,7 +23,7 @@ func CleanChainData() error {
 		return fmt.Errorf("failed to get current directory: %v", err)
 	}
 
-	projectRoot := filepath.Dir(cwd)
+	projectRoot := cwd
 
 	err = filepath.Walk(projectRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -57,6 +58,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	var wg sync.WaitGroup
 
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
+	InitGateway(nodes)
 
 	fmt.Println("Waiting for genesis block to be created...")
 	time.Sleep(time.Duration(slotInterval) * time.Second)
@@ -122,8 +124,14 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 				}
 			}
 
-			type pendingEntry struct{ domain string; records []blockchain.Record; salt []byte; commitBlock int64 }
+			type pendingEntry struct {
+				domain      string
+				records     []blockchain.Record
+				salt        []byte
+				commitBlock int64
+			}
 			pendingCommits := make(map[int]pendingEntry) // commitTID → entry
+			ownedDomains := make([]string, 0)            // domains this node successfully revealed
 
 			for time.Now().Before(simStopTime) {
 				if node.Blockchain != nil {
@@ -151,6 +159,8 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 								domainsMu.Lock()
 								domains = append(domains, entry.domain)
 								domainsMu.Unlock()
+								// Track ownership for renewal
+								ownedDomains = append(ownedDomains, entry.domain)
 							}
 						}
 						lastSeenBlock = latest.Index
@@ -184,16 +194,10 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					atomic.AddInt64(&totalTxns, 1)
 				}
 
-				// Chance to renew a previously registered domain
-				domainsMu.Lock()
-				nDomains := len(domains)
-				domainsMu.Unlock()
-
-				if nDomains > 0 && rand.Float64() < renewProbability {
-					domainsMu.Lock()
-					target := rand.Intn(len(domains))
-					domain := domains[target]
-					domainsMu.Unlock()
+				// Chance to renew a previously registered domain (only domains this node owns)
+				if len(ownedDomains) > 0 && rand.Float64() < renewProbability {
+					target := rand.Intn(len(ownedDomains))
+					domain := ownedDomains[target]
 
 					// Look up the current registration to get TID, ExpirySlot, OwnerKey
 					oldTx := node.IndexManager.GetDomain(domain)
@@ -225,13 +229,19 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					}
 				}
 
-				// Chance to send a DNS request
+				// Chance to send a DNS request (query from global domains list)
 				domainsMu.Lock()
 				nDomainsQ := len(domains)
 				domainsMu.Unlock()
 
 				if time.Now().After(txOnlyTime) && nDomainsQ > 0 && rand.Float64() < queryProbability {
 					domainsMu.Lock()
+					// Only query if we have domains
+					if len(domains) == 0 {
+						domainsMu.Unlock()
+						time.Sleep(interval)
+						continue
+					}
 					target := rand.Intn(len(domains))
 					domain := domains[target]
 					domainsMu.Unlock()
@@ -252,9 +262,53 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 		}(node, i)
 	}
 
+	// DNS ticker: probe the UDP DNS server once every 5 s after domains are registered
+	dnsTickStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-dnsTickStop:
+				return
+			case <-ticker.C:
+				domainsMu.Lock()
+				if len(domains) == 0 {
+					domainsMu.Unlock()
+					continue
+				}
+				d := domains[rand.Intn(len(domains))]
+				domainsMu.Unlock()
+				m := new(dns.Msg)
+				m.SetQuestion(dns.Fqdn(d), dns.TypeA)
+				if resp, err := dns.Exchange(m, "127.0.0.1:5300"); err == nil {
+					fmt.Printf("[DNS-tick] %s → rcode=%d answers=%d\n", d, resp.Rcode, len(resp.Answer))
+				}
+			}
+		}
+	}()
+
 	wg.Wait()
+	close(dnsTickStop)
+
+	// Log HeaderChain length for the light node (index 1)
+	for i, node := range nodes {
+		if !node.IsFullNode {
+			fmt.Printf("[RandSim] light node %d HeaderChain length: %d\n", i+1, len(node.HeaderChain))
+			break
+		}
+	}
+
 	time.Sleep(10 * time.Second) // wait until nodes are ready
-	client.RunAutoClient(domains)
+	domainsMu.Lock()
+	nDomains := len(domains)
+	domainsMu.Unlock()
+
+	if nDomains > 0 {
+		client.RunAutoClient(domains)
+	} else {
+		fmt.Println("[RandSim] WARNING: No domains registered, skipping AutoClient")
+	}
 
 	totalTime := 0.0
 
@@ -273,6 +327,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	fmt.Printf("Queries per second: %f\n", QueriesPerSec)
 
 	metrics.PrintMetrics()
+	CloseGateway(nodes)
 	network.NodesCleanup(nodes)
 
 	if err := CleanChainData(); err != nil {
@@ -280,5 +335,5 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	}
 
 	fmt.Println("Simulation completed")
-	time.Sleep(5 * time.Second)
+	os.Exit(0)
 }

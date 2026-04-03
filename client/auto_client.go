@@ -50,6 +50,13 @@ func sendDNSQuery(domain string, port string, wg *sync.WaitGroup) {
 
 func RunAutoClient(domains []string) {
 	fmt.Println(" Intitiating client queries:")
+
+	// Guard against empty domains to prevent panic in rand.Intn
+	if len(domains) == 0 {
+		fmt.Println(" WARNING: No domains provided, skipping queries")
+		return
+	}
+
 	// No need for rand.Seed as we're using crypto/rand
 	var wg sync.WaitGroup
 

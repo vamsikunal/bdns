@@ -3,14 +3,20 @@ package sims
 import (
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/network"
+	"github.com/miekg/dns"
 )
 
 func SimpleSim() {
+	if err := CleanChainData(); err != nil {
+		fmt.Printf("[SimpleSim] Warning: chaindata cleanup failed: %v\n", err)
+	}
+
 	// Constants
 	const numNodes = 6
 	const slotInterval = 5
@@ -32,6 +38,7 @@ func SimpleSim() {
 	}
 
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
+	InitGateway(nodes)
 
 	fmt.Println("Waiting for genesis block to be created...")
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
@@ -68,63 +75,70 @@ func SimpleSim() {
 	wgStake.Wait()
 	fmt.Println("[SimpleSim] All STAKEs confirmed (or timeout reached)")
 
-	// Each node registers its own domain via COMMIT → REVEAL
+	// Each node registers its own domain via COMMIT (Broadcast concurrently)
 	domains := make([]string, numNodes)
 	commitTIDs := make([]int, numNodes)
 	salts := make([][]byte, numNodes)
 	slotsPerDay := int64(86400 / slotInterval)
+
+	fmt.Println("[SimpleSim] Wait for STAKEs, then broadcast COMMITs...")
+	var wgCommit sync.WaitGroup
 	for i, node := range nodes {
-		domains[i] = fmt.Sprintf("node%d.com", i+1)
-		ip := fmt.Sprintf("192.168.1.%d", i+1)
-		records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
-		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		wgCommit.Add(1)
+		go func(i int, node *network.Node) {
+			defer wgCommit.Done()
+			pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
 
-		// Wait for this node's STAKE to be confirmed in its local ledger
-		if !waitForNonce(node, pubKeyHex, 1, slotInterval*slotsPerEpoch*8) {
-			fmt.Printf("[WARN] node%d STAKE not mined in time, COMMIT may fail\n", i+1)
-		}
+			if !waitForNonce(node, pubKeyHex, 1, slotInterval*slotsPerEpoch*8) {
+				fmt.Printf("[WARN] node%d STAKE not mined in time, COMMIT may fail\n", i+1)
+			}
 
-		// Generate salt
-		salt := make([]byte, 16)
-		for j := range salt {
-			salt[j] = byte(i*16 + j)
-		}
-		salts[i] = salt
-		_ = records
-
-		commitNonce := freshNonce(node)
-		commitTx := blockchain.NewCommitTransaction(domains[i], salt,
-			node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, 1, commitNonce, node.TransactionPool)
-		commitTIDs[i] = commitTx.TID
-		node.BroadcastTransaction(*commitTx)
-		fmt.Printf("[COMMIT] node%d → %s (nonce=%d)\n", i+1, domains[i], commitNonce)
-		time.Sleep(500 * time.Millisecond)
+			domains[i] = fmt.Sprintf("node%d.com", i+1)
+			salt := make([]byte, 16)
+			for j := range salt {
+				salt[j] = byte(i*16 + j)
+			}
+			salts[i] = salt
+			commitNonce := freshNonce(node)
+			commitTx := blockchain.NewCommitTransaction(domains[i], salt,
+				node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, 1, commitNonce, node.TransactionPool)
+			commitTIDs[i] = commitTx.TID
+			node.BroadcastTransaction(*commitTx)
+			fmt.Printf("[COMMIT] node%d → %s (nonce=%d)\n", i+1, domains[i], commitNonce)
+		}(i, node)
 	}
+	wgCommit.Wait()
 
 	fmt.Println("[SimpleSim] Waiting for COMMITs to be mined...")
 	time.Sleep(time.Duration(slotInterval*(slotsPerEpoch+int(blockchain.CommitMinDelay)+1)) * time.Second)
 
 	// REVEAL each domain
+	fmt.Println("[SimpleSim] Wait for COMMITs, then broadcast REVEALs...")
+	var wgReveal sync.WaitGroup
 	for i, node := range nodes {
-		ip := fmt.Sprintf("192.168.1.%d", i+1)
-		records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
-		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		wgReveal.Add(1)
+		go func(i int, node *network.Node) {
+			defer wgReveal.Done()
+			pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
 
-		// Wait for COMMIT to be confirmed before REVEAL
-		if !waitForNonce(node, pubKeyHex, 2, slotInterval*slotsPerEpoch*10) {
-			fmt.Printf("[WARN] node%d COMMIT not confirmed, REVEAL may fail\n", i+1)
-		}
-		revealNonce := freshNonce(node)
+			if !waitForNonce(node, pubKeyHex, 2, slotInterval*slotsPerEpoch*10) {
+				fmt.Printf("[WARN] node%d COMMIT not confirmed, REVEAL may fail\n", i+1)
+			}
 
-		nextBlock := node.Blockchain.GetLatestBlock().Index + 1
-		revealTx := blockchain.NewRevealTransaction(domains[i], salts[i], records,
-			3600, nextBlock, slotsPerDay, commitTIDs[i],
-			node.KeyPair.PublicKey, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey,
-			1, revealNonce, node.TransactionPool)
-		node.BroadcastTransaction(*revealTx)
-		fmt.Printf("[REVEAL] node%d → %s → %s (nonce=%d)\n", i+1, domains[i], ip, revealNonce)
-		time.Sleep(500 * time.Millisecond)
+			ip := fmt.Sprintf("192.168.1.%d", i+1)
+			records := []blockchain.Record{{Type: "A", Value: ip, Priority: 0}}
+			revealNonce := freshNonce(node)
+
+			nextBlock := node.Blockchain.GetLatestBlock().Index + 1
+			revealTx := blockchain.NewRevealTransaction(domains[i], salts[i], records,
+				3600, nextBlock, slotsPerDay, commitTIDs[i],
+				node.KeyPair.PublicKey, node.KeyPair.PublicKey, &node.KeyPair.PrivateKey,
+				1, revealNonce, node.TransactionPool)
+			node.BroadcastTransaction(*revealTx)
+			fmt.Printf("[REVEAL] node%d → %s → %s (nonce=%d)\n", i+1, domains[i], ip, revealNonce)
+		}(i, node)
 	}
+	wgReveal.Wait()
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*2) * time.Second)
 
 	queryNode := bestQueryNode(nodes, domains)
@@ -164,6 +178,29 @@ func SimpleSim() {
 	fmt.Printf("  Skipped: %d  (not yet indexed — pre-existing fork issue)\n", skip)
 	fmt.Printf("  Failed : %d\n", fail)
 
+	// UDP probe: verify at least one DNS server answers on its assigned port
+	fmt.Println("\n=== SimpleSim: UDP DNS Probe ===")
+	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue
+		}
+		port := fmt.Sprintf("127.0.0.1:%d", 5300+i)
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(domains[0]), dns.TypeA)
+		resp, err := dns.Exchange(m, port)
+		if err != nil {
+			fmt.Printf(" probe :%d → error: %v\n", 5300+i, err)
+		} else {
+			fmt.Printf(" probe :%d → rcode=%d answers=%d\n", 5300+i, resp.Rcode, len(resp.Answer))
+		}
+		break // one probe is enough for smoke-test
+	}
+
+	CloseGateway(nodes)
 	network.NodesCleanup(nodes)
+	if err := CleanChainData(); err != nil {
+		fmt.Printf("[SimpleSim] Warning: post-run chaindata cleanup failed: %v\n", err)
+	}
 	fmt.Println("Simple simulation completed.")
+	os.Exit(0)
 }

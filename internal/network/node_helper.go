@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
-	"github.com/bleasey/bdns/internal/gateway"
 	"github.com/bleasey/bdns/internal/index"
 	pb "github.com/bleasey/bdns/internal/proto/gatwaypb"
 )
 
-
+type nxdomainPool interface {
+	GetHealthyCount() int
+	QueryWithFailover(domain string, blockIndex int64) (*pb.DomainQueryResponse, error)
+}
 
 func copyStringBoolMap(src map[string]bool) map[string]bool {
 	dst := make(map[string]bool, len(src))
@@ -86,7 +88,6 @@ func (n *Node) AddBlock(block *blockchain.Block) {
 		n.AddBlockHeader(block.Header())
 	}
 }
-
 
 func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	n.TxMutex.Lock()
@@ -245,14 +246,14 @@ func (n *Node) HandleDNSQuery(sender string, query DNSQueryMsg) {
 		n.TxMutex.Unlock()
 		log.Printf("[DNS_QUERY] Domain %s is in %s phase, not serving proof\n", query.DomainName, phase)
 		return
-	}// Waits for the block header, validates the Merkle proof, and checks K-confirmations.
+	} // Waits for the block header, validates the Merkle proof, and checks K-confirmations.
 
 	loc := n.IndexManager.GetTxLocation(query.DomainName)
 	n.TxMutex.Unlock()
 
 	if loc == nil {
 		return
-	}// Waits for the block header, validates the Merkle proof, and checks K-confirmations.
+	} // Waits for the block header, validates the Merkle proof, and checks K-confirmations.
 
 	n.BcMutex.Lock()
 	block := n.Blockchain.GetBlockByIndex(loc.BlockIndex)
@@ -326,8 +327,17 @@ func (n *Node) waitForHeader(index int64, timeout time.Duration) *blockchain.Blo
 	pollInterval := 100 * time.Millisecond
 
 	for {
+		n.BcMutex.Lock()
+		var found bool
+		var header blockchain.BlockHeader
 		if int(index) < len(n.HeaderChain) {
-			return &n.HeaderChain[index]
+			header = n.HeaderChain[index]
+			found = true
+		}
+		n.BcMutex.Unlock()
+
+		if found {
+			return &header
 		}
 
 		if time.Now().After(deadline) {
@@ -339,11 +349,12 @@ func (n *Node) waitForHeader(index int64, timeout time.Duration) *blockchain.Blo
 }
 
 // VerifyNXDOMAIN confirms domain absence via TOFU consensus across healthy full nodes.
+// Requires at least 2 healthy peers; returns true only when all agree the domain is absent.
 func (n *Node) VerifyNXDOMAIN(domain string) bool {
 	if n.ConnectionPool == nil {
 		return false
 	}
-	pool, ok := n.ConnectionPool.(*gateway.ConnectionPool)
+	pool, ok := n.ConnectionPool.(nxdomainPool)
 	if !ok {
 		return false
 	}
@@ -354,7 +365,8 @@ func (n *Node) VerifyNXDOMAIN(domain string) bool {
 	return err != nil
 }
 
-// HandleDNSProofGRPC verifies // Waits for the block header, validates the Merkle proof, and checks K-confirmations.a DNS proof delivered over gRPC by the gateway layer.
+// HandleDNSProofGRPC verifies a DNS proof delivered over gRPC by the gateway layer.
+// Waits for the block header, validates the Merkle proof, and checks K-confirmations.
 func (n *Node) HandleDNSProofGRPC(resp *pb.DomainQueryResponse) bool {
 	if resp == nil || resp.BlockHeader == nil || resp.Proof == nil {
 		return false

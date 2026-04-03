@@ -146,3 +146,14 @@ func TestCommitReveal(t *testing.T) {
 
 	sims.CommitRevealSim()
 }
+
+func TestGatewaySim(t *testing.T) {
+	fmt.Println("\n=== Running Gateway Simulation Test ===")
+
+	if err := sims.CleanChainData(); err != nil {
+		t.Fatalf("Failed to clean chaindata: %v", err)
+	}
+	time.Sleep(3 * time.Second)
+
+	sims.GatewaySim()
+}

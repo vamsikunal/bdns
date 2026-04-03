@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/bleasey/bdns/internal/index"
 	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/miekg/dns"
 )
 
 // headerBroadcaster is the minimal interface the node needs from GatewayServer.
@@ -36,42 +36,42 @@ type poolCloser interface {
 
 // Node represents a blockchain peer
 type Node struct {
-	Address         string
-	Port            int
-	Config          NodeConfig
-	P2PNetwork      *P2PNetwork
-	KeyPair         *blockchain.KeyPair
-	RegistryKeys    [][]byte
-	SlotLeaders     map[int64][]byte // epoch to slot leader
-	SlotMutex       sync.Mutex
-	TransactionPool map[int]*blockchain.Transaction
-	TxMutex         sync.Mutex
-	IndexManager    *index.IndexManager
-	Blockchain      *blockchain.Blockchain
-	BcMutex         sync.Mutex
-	RandomNumber    []byte
-	RandomMutex     sync.Mutex
-	EpochRandoms    map[int64]map[string][]byte
-	EpochCommitments map[int64]map[string][]byte
-	MySecrets       map[int64]consensus.SecretValues
-	PendingReveals  map[int64]map[string]consensus.RevealData
-	DRGDedupCache  map[string]uint64
-	DRGDedupMutex  sync.Mutex
+	Address                 string
+	Port                    int
+	Config                  NodeConfig
+	P2PNetwork              *P2PNetwork
+	KeyPair                 *blockchain.KeyPair
+	RegistryKeys            [][]byte
+	SlotLeaders             map[int64][]byte // epoch to slot leader
+	SlotMutex               sync.Mutex
+	TransactionPool         map[int]*blockchain.Transaction
+	TxMutex                 sync.Mutex
+	IndexManager            *index.IndexManager
+	Blockchain              *blockchain.Blockchain
+	BcMutex                 sync.Mutex
+	RandomNumber            []byte
+	RandomMutex             sync.Mutex
+	EpochRandoms            map[int64]map[string][]byte
+	EpochCommitments        map[int64]map[string][]byte
+	MySecrets               map[int64]consensus.SecretValues
+	PendingReveals          map[int64]map[string]consensus.RevealData
+	DRGDedupCache           map[string]uint64
+	DRGDedupMutex           sync.Mutex
 	ValidatorSetCacheAtomic atomic.Value // stores map[string]struct{} snapshots
-	IsFullNode      bool // full vs light node
-	PeerID          string
-	KnownFullPeers  []string
-	HeaderChain     []blockchain.BlockHeader // Light nodes store only headers
-	GatewayServer   interface{}              // Full node gRPC server
-	ConnectionPool  interface{}              // Light node gRPC connection pool
-	cancel          context.CancelFunc       // cancels CreateBlockIfLeader goroutine
-	dnsConn         *net.UDPConn             // DNS server listener; closed by NodesCleanup
-	BalanceLedger   *blockchain.BalanceLedger
-	CommitStore     *blockchain.CommitStore
-	StakeMap        blockchain.StakeStorer
-	UnstakeQueue    *blockchain.UnstakeQueue
-	SlashedEvidence map[string]bool
-	StakeMutex      sync.Mutex
+	IsFullNode              bool         // full vs light node
+	PeerID                  string
+	KnownFullPeers          []string
+	HeaderChain             []blockchain.BlockHeader // Light nodes store only headers
+	GatewayServer           interface{}              // Full node gRPC server
+	ConnectionPool          interface{}              // Light node gRPC connection pool
+	cancel                  context.CancelFunc       // cancels CreateBlockIfLeader goroutine
+	DNSServer               *dns.Server              // DNS server instance; closed by NodesCleanup
+	BalanceLedger           *blockchain.BalanceLedger
+	CommitStore             *blockchain.CommitStore
+	StakeMap                blockchain.StakeStorer
+	UnstakeQueue            *blockchain.UnstakeQueue
+	SlashedEvidence         map[string]bool
+	StakeMutex              sync.Mutex
 }
 
 // Node Config
@@ -97,12 +97,12 @@ func NewNode(ctx context.Context, addr string, topicName string, isFullNode bool
 	}
 
 	node := &Node{
-		Address:         p2p.Host.Addrs()[0].String(),
-		P2PNetwork:      p2p,
-		KeyPair:         blockchain.NewKeyPair(),
-		SlotLeaders:     make(map[int64][]byte),
-		TransactionPool: make(map[int]*blockchain.Transaction),
-		IndexManager:    index.NewIndexManager(),
+		Address:          p2p.Host.Addrs()[0].String(),
+		P2PNetwork:       p2p,
+		KeyPair:          blockchain.NewKeyPair(),
+		SlotLeaders:      make(map[int64][]byte),
+		TransactionPool:  make(map[int]*blockchain.Transaction),
+		IndexManager:     index.NewIndexManager(),
 		Blockchain:       nil,
 		EpochRandoms:     make(map[int64]map[string][]byte),
 		EpochCommitments: make(map[int64]map[string][]byte),
@@ -113,8 +113,8 @@ func NewNode(ctx context.Context, addr string, topicName string, isFullNode bool
 		StakeMap:         blockchain.NewStakeMap(),
 		UnstakeQueue:     blockchain.NewUnstakeQueue(),
 		SlashedEvidence:  make(map[string]bool),
-		PeerID:          p2p.Host.ID().String(),
-		KnownFullPeers:  []string{},
+		PeerID:           p2p.Host.ID().String(),
+		KnownFullPeers:   []string{},
 	}
 
 	go node.ListenForDirectMessages()
@@ -518,7 +518,6 @@ func (n *Node) BroadcastReveal(epoch int64) error {
 	return nil
 }
 
-
 func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *metrics.DNSMetrics) {
 	start := time.Now()
 
@@ -598,6 +597,9 @@ func (n *Node) RandomNumberHandler(epoch int64, sender string, _ int, _ int) {
 
 // AddBlockHeader stores a block header for light nodes (chain extension with validation)
 func (n *Node) AddBlockHeader(header blockchain.BlockHeader) {
+	n.BcMutex.Lock()
+	defer n.BcMutex.Unlock()
+
 	if len(n.HeaderChain) > 0 {
 		latest := n.HeaderChain[len(n.HeaderChain)-1]
 		if !bytes.Equal(header.PrevHash, latest.Hash) {

@@ -75,7 +75,7 @@ func (s *GatewayServer) SubscribeHeaders(
 	}()
 
 	// Replay historical headers the light node has not seen yet
-	if req.StartIndex > 0 {
+	if req.StartIndex > 0 && s.node != nil {
 		s.node.BcMutex.Lock()
 		tip := s.node.Blockchain.GetLatestBlock().Index
 		s.node.BcMutex.Unlock()
@@ -163,11 +163,11 @@ func (s *GatewayServer) QueryDomain(
 	h := block.Header()
 
 	return &pb.DomainQueryResponse{
-		DomainName:  req.DomainName,
-		IpAddress:   ipAddress,
-		Proof:       &pb.MerkleProof{
-			TxHash:    proof.TxHash,
-			ProofPath: proof.ProofPath,
+		DomainName: req.DomainName,
+		IpAddress:  ipAddress,
+		Proof: &pb.MerkleProof{
+			TxHash:     proof.TxHash,
+			ProofPath:  proof.ProofPath,
 			Directions: proof.Directions,
 		},
 		BlockHeader: toProtoHeader(&h),
@@ -179,6 +179,10 @@ func (s *GatewayServer) HealthCheck(
 	ctx context.Context,
 	req *pb.HealthCheckRequest,
 ) (*pb.HealthCheckResponse, error) {
+	if s.node == nil {
+		return &pb.HealthCheckResponse{Healthy: false}, nil
+	}
+
 	s.node.BcMutex.Lock()
 	height := s.node.Blockchain.GetLatestBlock().Index
 	s.node.BcMutex.Unlock()
@@ -207,9 +211,9 @@ func (s *GatewayServer) BroadcastHeader(header *blockchain.BlockHeader) {
 	}
 }
 
-// Close performs a graceful shutdown of the gRPC server
+// Close performs a shutdown of the gRPC server
 func (s *GatewayServer) Close() {
-	s.grpcServer.GracefulStop()
+	s.grpcServer.Stop()
 }
 
 // toProtoHeader converts a blockchain.BlockHeader to its proto representation
@@ -221,5 +225,17 @@ func toProtoHeader(h *blockchain.BlockHeader) *pb.BlockHeader {
 		PrevHash:   h.PrevHash,
 		MerkleRoot: h.MerkleRoot,
 		IndexHash:  h.IndexHash,
+	}
+}
+
+// ToProtoHeader converts a blockchain.BlockHeader to its proto representation (exported for tests)
+func ToProtoHeader(h *blockchain.BlockHeader) *pb.BlockHeader {
+	return toProtoHeader(h)
+}
+
+// NewGatewayServerForTest creates a GatewayServer without starting the gRPC listener (for testing)
+func NewGatewayServerForTest() *GatewayServer {
+	return &GatewayServer{
+		subscribers: make(map[string]chan *pb.BlockHeader),
 	}
 }
