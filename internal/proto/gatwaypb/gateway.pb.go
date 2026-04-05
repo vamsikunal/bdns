@@ -427,6 +427,110 @@ func (x *HealthCheckResponse) GetPeerCount() int32 {
 	return 0
 }
 
+type TransactionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SerializedTx  []byte                 `protobuf:"bytes,1,opt,name=serialized_tx,json=serializedTx,proto3" json:"serialized_tx,omitempty"` // gob-encoded blockchain.Transaction
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransactionRequest) Reset() {
+	*x = TransactionRequest{}
+	mi := &file_gateway_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionRequest) ProtoMessage() {}
+
+func (x *TransactionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gateway_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionRequest.ProtoReflect.Descriptor instead.
+func (*TransactionRequest) Descriptor() ([]byte, []int) {
+	return file_gateway_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *TransactionRequest) GetSerializedTx() []byte {
+	if x != nil {
+		return x.SerializedTx
+	}
+	return nil
+}
+
+type TransactionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	TxHash        string                 `protobuf:"bytes,2,opt,name=tx_hash,json=txHash,proto3" json:"tx_hash,omitempty"`
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TransactionResponse) Reset() {
+	*x = TransactionResponse{}
+	mi := &file_gateway_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TransactionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TransactionResponse) ProtoMessage() {}
+
+func (x *TransactionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gateway_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TransactionResponse.ProtoReflect.Descriptor instead.
+func (*TransactionResponse) Descriptor() ([]byte, []int) {
+	return file_gateway_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *TransactionResponse) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *TransactionResponse) GetTxHash() string {
+	if x != nil {
+		return x.TxHash
+	}
+	return ""
+}
+
+func (x *TransactionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 var File_gateway_proto protoreflect.FileDescriptor
 
 const file_gateway_proto_rawDesc = "" +
@@ -469,11 +573,18 @@ const file_gateway_proto_rawDesc = "" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12!\n" +
 	"\fchain_height\x18\x02 \x01(\x03R\vchainHeight\x12\x1d\n" +
 	"\n" +
-	"peer_count\x18\x03 \x01(\x05R\tpeerCount2\xe8\x01\n" +
+	"peer_count\x18\x03 \x01(\x05R\tpeerCount\"9\n" +
+	"\x12TransactionRequest\x12#\n" +
+	"\rserialized_tx\x18\x01 \x01(\fR\fserializedTx\"`\n" +
+	"\x13TransactionResponse\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x17\n" +
+	"\atx_hash\x18\x02 \x01(\tR\x06txHash\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error2\xbb\x02\n" +
 	"\vBDNSGateway\x12E\n" +
 	"\x10SubscribeHeaders\x12\x19.gateway.SubscribeRequest\x1a\x14.gateway.BlockHeader0\x01\x12H\n" +
 	"\vQueryDomain\x12\x1b.gateway.DomainQueryRequest\x1a\x1c.gateway.DomainQueryResponse\x12H\n" +
-	"\vHealthCheck\x12\x1b.gateway.HealthCheckRequest\x1a\x1c.gateway.HealthCheckResponseB1Z/github.com/bleasey/bdns/internal/proto/gatwaypbb\x06proto3"
+	"\vHealthCheck\x12\x1b.gateway.HealthCheckRequest\x1a\x1c.gateway.HealthCheckResponse\x12Q\n" +
+	"\x14BroadcastTransaction\x12\x1b.gateway.TransactionRequest\x1a\x1c.gateway.TransactionResponseB1Z/github.com/bleasey/bdns/internal/proto/gatwaypbb\x06proto3"
 
 var (
 	file_gateway_proto_rawDescOnce sync.Once
@@ -487,7 +598,7 @@ func file_gateway_proto_rawDescGZIP() []byte {
 	return file_gateway_proto_rawDescData
 }
 
-var file_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_gateway_proto_goTypes = []any{
 	(*BlockHeader)(nil),         // 0: gateway.BlockHeader
 	(*MerkleProof)(nil),         // 1: gateway.MerkleProof
@@ -496,6 +607,8 @@ var file_gateway_proto_goTypes = []any{
 	(*DomainQueryResponse)(nil), // 4: gateway.DomainQueryResponse
 	(*HealthCheckRequest)(nil),  // 5: gateway.HealthCheckRequest
 	(*HealthCheckResponse)(nil), // 6: gateway.HealthCheckResponse
+	(*TransactionRequest)(nil),  // 7: gateway.TransactionRequest
+	(*TransactionResponse)(nil), // 8: gateway.TransactionResponse
 }
 var file_gateway_proto_depIdxs = []int32{
 	1, // 0: gateway.DomainQueryResponse.proof:type_name -> gateway.MerkleProof
@@ -503,11 +616,13 @@ var file_gateway_proto_depIdxs = []int32{
 	2, // 2: gateway.BDNSGateway.SubscribeHeaders:input_type -> gateway.SubscribeRequest
 	3, // 3: gateway.BDNSGateway.QueryDomain:input_type -> gateway.DomainQueryRequest
 	5, // 4: gateway.BDNSGateway.HealthCheck:input_type -> gateway.HealthCheckRequest
-	0, // 5: gateway.BDNSGateway.SubscribeHeaders:output_type -> gateway.BlockHeader
-	4, // 6: gateway.BDNSGateway.QueryDomain:output_type -> gateway.DomainQueryResponse
-	6, // 7: gateway.BDNSGateway.HealthCheck:output_type -> gateway.HealthCheckResponse
-	5, // [5:8] is the sub-list for method output_type
-	2, // [2:5] is the sub-list for method input_type
+	7, // 5: gateway.BDNSGateway.BroadcastTransaction:input_type -> gateway.TransactionRequest
+	0, // 6: gateway.BDNSGateway.SubscribeHeaders:output_type -> gateway.BlockHeader
+	4, // 7: gateway.BDNSGateway.QueryDomain:output_type -> gateway.DomainQueryResponse
+	6, // 8: gateway.BDNSGateway.HealthCheck:output_type -> gateway.HealthCheckResponse
+	8, // 9: gateway.BDNSGateway.BroadcastTransaction:output_type -> gateway.TransactionResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name
 	2, // [2:2] is the sub-list for extension extendee
 	0, // [0:2] is the sub-list for field type_name
@@ -524,7 +639,7 @@ func file_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gateway_proto_rawDesc), len(file_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

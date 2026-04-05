@@ -6,3 +6,4 @@ chaindata
 /docs
 /scripts
 *.log
+/tests

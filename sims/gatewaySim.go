@@ -1,6 +1,7 @@
 package sims
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -8,8 +9,12 @@ import (
 	"time"
 
 	"github.com/bleasey/bdns/internal/blockchain"
+	"github.com/bleasey/bdns/internal/gateway"
 	"github.com/bleasey/bdns/internal/network"
+	pb "github.com/bleasey/bdns/internal/proto/gatwaypb"
 	"github.com/miekg/dns"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // GatewaySim runs five deterministic scenarios that validate the full W2W3-Gateway stack.
@@ -41,9 +46,12 @@ func GatewaySim() {
 		return false
 	}
 
-	// STAKE all nodes concurrently (each uses its own nonce=0).
+	// STAKE all full nodes concurrently — submit via gRPC to exercise the write-path.
 	var wgStake sync.WaitGroup
 	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue // light nodes don't have GatewayServer to submit through
+		}
 		wgStake.Add(1)
 		go func(i int, node *network.Node) {
 			defer wgStake.Done()
@@ -51,7 +59,27 @@ func GatewaySim() {
 			nonce := node.BalanceLedger.GetNonce(pubKeyHex)
 			tx := blockchain.NewStakeTransaction(10000,
 				node.KeyPair.PublicKey, &node.KeyPair.PrivateKey, 1, nonce, node.TransactionPool)
-			node.BroadcastTransaction(*tx)
+
+			// Open a real gRPC connection to this node's GatewayServer to exercise
+			// the full serialise → transport → deserialise → mempool path.
+			gs := node.GatewayServer.(*gateway.GatewayServer)
+			conn, err := grpc.NewClient(
+				fmt.Sprintf("127.0.0.1:%d", gs.Port),
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+			)
+			if err != nil {
+				fmt.Printf("[STAKE] node%d gRPC dial failed: %v\n", i+1, err)
+				return
+			}
+			defer conn.Close()
+			gwClient := pb.NewBDNSGatewayClient(conn)
+			_, err = gwClient.BroadcastTransaction(context.Background(), &pb.TransactionRequest{
+				SerializedTx: tx.Serialize(),
+			})
+			if err != nil {
+				fmt.Printf("[STAKE] node%d BroadcastTransaction failed: %v\n", i+1, err)
+				return
+			}
 			fmt.Printf("[STAKE] node%d staked 10000 coins\n", i+1)
 		}(i, node)
 	}
@@ -95,7 +123,26 @@ func GatewaySim() {
 	commitNonce := n0.BalanceLedger.GetNonce(pubKeyHex)
 	commitTx := blockchain.NewCommitTransaction(domain, salt,
 		n0.KeyPair.PublicKey, &n0.KeyPair.PrivateKey, 1, commitNonce, n0.TransactionPool)
-	n0.BroadcastTransaction(*commitTx)
+
+	// Submit via gRPC write-path instead of direct in-memory call.
+	gs := n0.GatewayServer.(*gateway.GatewayServer)
+	conn, err := grpc.NewClient(
+		fmt.Sprintf("127.0.0.1:%d", gs.Port),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		fmt.Printf("[COMMIT] gRPC dial failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+	gwClient := pb.NewBDNSGatewayClient(conn)
+	_, err = gwClient.BroadcastTransaction(context.Background(), &pb.TransactionRequest{
+		SerializedTx: commitTx.Serialize(),
+	})
+	if err != nil {
+		fmt.Printf("[COMMIT] BroadcastTransaction failed: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("[COMMIT] domain=%s nonce=%d\n", domain, commitNonce)
 
 	// Wait for COMMIT to be mined (nonce advances to commitNonce+1).
@@ -115,7 +162,15 @@ func GatewaySim() {
 		3600, nextBlock, slotsPerDay, commitTx.TID,
 		n0.KeyPair.PublicKey, n0.KeyPair.PublicKey, &n0.KeyPair.PrivateKey,
 		1, revealNonce, n0.TransactionPool)
-	n0.BroadcastTransaction(*revealTx)
+
+	// Reuse the gwClient opened for COMMIT above.
+	_, err = gwClient.BroadcastTransaction(context.Background(), &pb.TransactionRequest{
+		SerializedTx: revealTx.Serialize(),
+	})
+	if err != nil {
+		fmt.Printf("[REVEAL] BroadcastTransaction failed: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("[REVEAL] domain=%s nonce=%d\n", domain, revealNonce)
 
 	// Wait for REVEAL to be mined (nonce advances to revealNonce+1).

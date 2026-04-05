@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BDNSGateway_SubscribeHeaders_FullMethodName = "/gateway.BDNSGateway/SubscribeHeaders"
-	BDNSGateway_QueryDomain_FullMethodName      = "/gateway.BDNSGateway/QueryDomain"
-	BDNSGateway_HealthCheck_FullMethodName      = "/gateway.BDNSGateway/HealthCheck"
+	BDNSGateway_SubscribeHeaders_FullMethodName     = "/gateway.BDNSGateway/SubscribeHeaders"
+	BDNSGateway_QueryDomain_FullMethodName          = "/gateway.BDNSGateway/QueryDomain"
+	BDNSGateway_HealthCheck_FullMethodName          = "/gateway.BDNSGateway/HealthCheck"
+	BDNSGateway_BroadcastTransaction_FullMethodName = "/gateway.BDNSGateway/BroadcastTransaction"
 )
 
 // BDNSGatewayClient is the client API for BDNSGateway service.
@@ -33,6 +34,7 @@ type BDNSGatewayClient interface {
 	SubscribeHeaders(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BlockHeader], error)
 	QueryDomain(ctx context.Context, in *DomainQueryRequest, opts ...grpc.CallOption) (*DomainQueryResponse, error)
 	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
+	BroadcastTransaction(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*TransactionResponse, error)
 }
 
 type bDNSGatewayClient struct {
@@ -82,6 +84,16 @@ func (c *bDNSGatewayClient) HealthCheck(ctx context.Context, in *HealthCheckRequ
 	return out, nil
 }
 
+func (c *bDNSGatewayClient) BroadcastTransaction(ctx context.Context, in *TransactionRequest, opts ...grpc.CallOption) (*TransactionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransactionResponse)
+	err := c.cc.Invoke(ctx, BDNSGateway_BroadcastTransaction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BDNSGatewayServer is the server API for BDNSGateway service.
 // All implementations must embed UnimplementedBDNSGatewayServer
 // for forward compatibility.
@@ -91,6 +103,7 @@ type BDNSGatewayServer interface {
 	SubscribeHeaders(*SubscribeRequest, grpc.ServerStreamingServer[BlockHeader]) error
 	QueryDomain(context.Context, *DomainQueryRequest) (*DomainQueryResponse, error)
 	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
+	BroadcastTransaction(context.Context, *TransactionRequest) (*TransactionResponse, error)
 	mustEmbedUnimplementedBDNSGatewayServer()
 }
 
@@ -109,6 +122,9 @@ func (UnimplementedBDNSGatewayServer) QueryDomain(context.Context, *DomainQueryR
 }
 func (UnimplementedBDNSGatewayServer) HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method HealthCheck not implemented")
+}
+func (UnimplementedBDNSGatewayServer) BroadcastTransaction(context.Context, *TransactionRequest) (*TransactionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BroadcastTransaction not implemented")
 }
 func (UnimplementedBDNSGatewayServer) mustEmbedUnimplementedBDNSGatewayServer() {}
 func (UnimplementedBDNSGatewayServer) testEmbeddedByValue()                     {}
@@ -178,6 +194,24 @@ func _BDNSGateway_HealthCheck_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BDNSGateway_BroadcastTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransactionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BDNSGatewayServer).BroadcastTransaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BDNSGateway_BroadcastTransaction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BDNSGatewayServer).BroadcastTransaction(ctx, req.(*TransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BDNSGateway_ServiceDesc is the grpc.ServiceDesc for BDNSGateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -192,6 +226,10 @@ var BDNSGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "HealthCheck",
 			Handler:    _BDNSGateway_HealthCheck_Handler,
+		},
+		{
+			MethodName: "BroadcastTransaction",
+			Handler:    _BDNSGateway_BroadcastTransaction_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -45,9 +45,20 @@ message HealthCheckResponse {
   int32 peer_count   = 3;
 }
 
+message TransactionRequest {
+  bytes serialized_tx = 1; 
+}
+
+message TransactionResponse {
+  bool   accepted = 1;
+  string tx_hash  = 2;
+  string error    = 3;
+}
+
 // BDNSGateway is the gRPC service exposed by full nodes to light nodes
 service BDNSGateway {
-  rpc SubscribeHeaders(SubscribeRequest)  returns (stream BlockHeader);
-  rpc QueryDomain(DomainQueryRequest)     returns (DomainQueryResponse);
-  rpc HealthCheck(HealthCheckRequest)     returns (HealthCheckResponse);
+  rpc SubscribeHeaders(SubscribeRequest)       returns (stream BlockHeader);
+  rpc QueryDomain(DomainQueryRequest)          returns (DomainQueryResponse);
+  rpc HealthCheck(HealthCheckRequest)          returns (HealthCheckResponse);
+  rpc BroadcastTransaction(TransactionRequest) returns (TransactionResponse);
 }

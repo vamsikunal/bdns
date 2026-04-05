@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ type GatewayServer struct {
 	grpcServer  *grpc.Server
 	subscribers map[string]chan *pb.BlockHeader // keyed by peer address
 	mu          sync.RWMutex
+	Port        int // listening port, exposed for client connections
 }
 
 // NewGatewayServer starts a gRPC server on the given port and returns the handle
@@ -37,6 +39,7 @@ func NewGatewayServer(node *network.Node, port int) *GatewayServer {
 		node:        node,
 		grpcServer:  grpc.NewServer(),
 		subscribers: make(map[string]chan *pb.BlockHeader),
+		Port:        port,
 	}
 
 	pb.RegisterBDNSGatewayServer(s.grpcServer, s)
@@ -193,6 +196,36 @@ func (s *GatewayServer) HealthCheck(
 		Healthy:     true,
 		ChainHeight: height,
 		PeerCount:   int32(len(peers)),
+	}, nil
+}
+
+// BroadcastTransaction deserialises a signed transaction and 
+// injects it into the node's mempool for gossip propagation.
+func (s *GatewayServer) BroadcastTransaction(
+	ctx context.Context,
+	req *pb.TransactionRequest,
+) (*pb.TransactionResponse, error) {
+	tx := blockchain.DeserializeTx(req.SerializedTx)
+	if tx == nil {
+		return &pb.TransactionResponse{
+			Accepted: false,
+			Error:    "failed to deserialize transaction",
+		}, nil
+	}
+
+	// Early signature check — defensive, not authoritative
+	if !blockchain.VerifySignature(tx.OwnerKey, tx) {
+		return &pb.TransactionResponse{
+			Accepted: false,
+			Error:    "signature verification failed",
+		}, nil
+	}
+
+	s.node.BroadcastTransaction(*tx)
+
+	return &pb.TransactionResponse{
+		Accepted: true,
+		TxHash:   strconv.Itoa(tx.TID),
 	}, nil
 }
 

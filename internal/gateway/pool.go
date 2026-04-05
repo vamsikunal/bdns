@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bleasey/bdns/internal/blockchain"
 	pb "github.com/bleasey/bdns/internal/proto/gatwaypb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -17,6 +18,7 @@ var ErrAllPeersDown = errors.New("all full node peers unavailable")
 type PoolClient interface {
 	QueryDomain(domain string, blockIndex int64) (*pb.DomainQueryResponse, error)
 	HealthCheck() (*pb.HealthCheckResponse, error)
+	BroadcastTransaction(tx blockchain.Transaction) (*pb.TransactionResponse, error)
 	Close()
 }
 
@@ -66,6 +68,31 @@ func (p *ConnectionPool) QueryWithFailover(domain string, blockIndex int64) (*pb
 		}
 
 		log.Printf("[POOL] query failed on %s: %v", p.addrs[idx], err)
+		p.health[idx] = false
+	}
+
+	return nil, ErrAllPeersDown
+}
+
+// BroadcastTransactionWithFailover submits a transaction to the first healthy full node.
+func (p *ConnectionPool) BroadcastTransactionWithFailover(tx blockchain.Transaction) (*pb.TransactionResponse, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	start := p.current
+	for i := 0; i < len(p.clients); i++ {
+		idx := (start + i) % len(p.clients)
+		if !p.health[idx] {
+			continue
+		}
+
+		resp, err := p.clients[idx].BroadcastTransaction(tx)
+		if err == nil && resp != nil && resp.Accepted {
+			p.current = idx
+			return resp, nil
+		}
+
+		log.Printf("[POOL] broadcast failed on %s: %v", p.addrs[idx], err)
 		p.health[idx] = false
 	}
 

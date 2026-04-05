@@ -125,6 +125,15 @@ func (c *GatewayClient) HealthCheck() (*pb.HealthCheckResponse, error) {
 	return c.client.HealthCheck(context.Background(), &pb.HealthCheckRequest{})
 }
 
+// BroadcastTransaction submits a signed transaction to the full node's mempool.
+func (c *GatewayClient) BroadcastTransaction(tx blockchain.Transaction) (*pb.TransactionResponse, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client.BroadcastTransaction(c.ctx, &pb.TransactionRequest{
+		SerializedTx: tx.Serialize(),
+	})
+}
+
 // Close shuts down the gRPC connection and cancels the streaming goroutine
 func (c *GatewayClient) Close() {
 	c.cancel()
