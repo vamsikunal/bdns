@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/boltdb/bolt"
 	"log"
 	"os"
+
+	"github.com/boltdb/bolt"
 )
 
 const dbFile = "chaindata/blockchain_%s.db"
@@ -163,11 +164,39 @@ func (bc *Blockchain) FindTransaction(tid int) (Transaction, error) {
 	return Transaction{}, errors.New("Transaction is not found")
 }
 
-// Iterator returns a BlockchainIterat
+// Iterator returns a BlockchainIterator
 func (bc *Blockchain) Iterator() *BlockchainIterator {
 	bci := &BlockchainIterator{bc.tip, bc.db}
 
 	return bci
+}
+
+// BlockchainIterator is used to iterate over blockchain blocks
+// revive:disable-next-line
+type BlockchainIterator struct {
+	currentHash []byte
+	db          *bolt.DB
+}
+
+// Next returns next block starting from the tip
+func (i *BlockchainIterator) Next() *Block {
+	var block *Block
+
+	err := i.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		encodedBlock := b.Get(i.currentHash)
+		block = DeserializeBlock(encodedBlock)
+
+		return nil
+	})
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	i.currentHash = block.PrevHash
+
+	return block
 }
 
 // GetBestHeight returns the height (Index) of the latest block
