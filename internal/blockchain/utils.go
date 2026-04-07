@@ -6,8 +6,8 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"log"
+	"math/big"
 	"os"
 )
 
@@ -56,39 +56,54 @@ func areStakesEqual(m1, m2 map[string]uint64) bool {
 	return true
 }
 
-func (tx *Transaction) PrintTx() {
-	fmt.Printf("\nTID: %x\n", tx.TID)
-	fmt.Printf("Type: %d\n", tx.Type)
-	fmt.Printf("Timestamp: %d\n", tx.Timestamp)
-	fmt.Printf("DomainName: %s\n", tx.DomainName)
-	fmt.Printf("Records:\n")
-	for _, r := range tx.Records {
-		fmt.Printf("  [%s] %s (priority %d)\n", r.Type, r.Value, r.Priority)
+var b58Alphabet = []byte("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+// Base58Encode encodes a byte array to Base58
+func Base58Encode(input []byte) []byte {
+	var result []byte
+
+	x := big.NewInt(0).SetBytes(input)
+
+	base := big.NewInt(int64(len(b58Alphabet)))
+	zero := big.NewInt(0)
+	mod := &big.Int{}
+
+	for x.Cmp(zero) != 0 {
+		x.DivMod(x, base, mod)
+		result = append(result, b58Alphabet[mod.Int64()])
 	}
-	fmt.Printf("CacheTTL: %d\n", tx.CacheTTL)
-	fmt.Printf("ExpirySlot: %d\n", tx.ExpirySlot)
-	fmt.Printf("RedeemsTxID: %d\n", tx.RedeemsTxID)
-	fmt.Printf("OwnerKey: %s\n", tx.OwnerKey)
-	fmt.Printf("Signature: %d\n\n", tx.Signature)
+
+	if input[0] == 0x00 {
+		result = append(result, b58Alphabet[0])
+	}
+
+	ReverseBytes(result)
+
+	return result
 }
 
-func (b *Block) PrintBlock() {
-	fmt.Println("- - - - - - Printing Block - - - - - -")
-	fmt.Printf("Index: %d\n", b.Index)
-	fmt.Printf("Timestamp: %d\n", b.Timestamp)
-	fmt.Printf("SlotLeader: %s\n", b.SlotLeader)
-	fmt.Printf("Signature: %s\n", b.Signature)
-	fmt.Printf("IndexHash: %x\n", b.IndexHash)
-	fmt.Printf("MerkleRootHash: %x\n", b.MerkleRootHash)
-	fmt.Println("StakeData:")
-	for key, value := range b.StakeData {
-		fmt.Printf("%s: %d,\t", key, value)
+// Base58Decode decodes Base58-encoded data
+func Base58Decode(input []byte) []byte {
+	result := big.NewInt(0)
+
+	for _, b := range input {
+		charIndex := bytes.IndexByte(b58Alphabet, b)
+		result.Mul(result, big.NewInt(58))
+		result.Add(result, big.NewInt(int64(charIndex)))
 	}
-	fmt.Println("Transactions:")
-	for _, tx := range b.Transactions {
-		tx.PrintTx()
+
+	decoded := result.Bytes()
+
+	if input[0] == b58Alphabet[0] {
+		decoded = append([]byte{0x00}, decoded...)
 	}
-	fmt.Printf("PrevHash: %x\n", b.PrevHash)
-	fmt.Printf("Hash: %x\n", b.Hash)
-	fmt.Println("- - - - - - - - - - - - - - - - - - - -")
+
+	return decoded
+}
+
+// ReverseBytes reverses a byte array
+func ReverseBytes(data []byte) {
+	for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
+		data[i], data[j] = data[j], data[i]
+	}
 }
