@@ -10,9 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bleasey/bdns/client"
 	"github.com/bleasey/bdns/internal/blockchain"
-	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/bleasey/bdns/internal/network"
 	"github.com/miekg/dns"
 )
@@ -92,7 +90,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	var totalQueries int64
 	var totalTxns int64
 
-	metrics := metrics.GetDNSMetrics()
+	dnsMetrics := network.GetDNSMetrics()
 
 	wg.Add(numNodes)
 
@@ -247,7 +245,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 					domainsMu.Unlock()
 
 					startTime := time.Now()
-					node.MakeDNSRequest(domain, metrics)
+					node.MakeDNSRequest(domain, dnsMetrics)
 					endTime := time.Now()
 
 					latencyMu.Lock()
@@ -299,17 +297,6 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 		}
 	}
 
-	time.Sleep(10 * time.Second) // wait until nodes are ready
-	domainsMu.Lock()
-	nDomains := len(domains)
-	domainsMu.Unlock()
-
-	if nDomains > 0 {
-		client.RunAutoClient(domains)
-	} else {
-		fmt.Println("[RandSim] WARNING: No domains registered, skipping AutoClient")
-	}
-
 	totalTime := 0.0
 
 	for _, latency := range LatencyTimes {
@@ -326,7 +313,7 @@ func RandSim(numNodes int, txTime time.Duration, simulationTime time.Duration, i
 	fmt.Printf("Txns per second: %f\n", TxnsPerSec)
 	fmt.Printf("Queries per second: %f\n", QueriesPerSec)
 
-	metrics.PrintMetrics()
+	dnsMetrics.PrintMetrics()
 	CloseGateway(nodes)
 	network.NodesCleanup(nodes)
 
