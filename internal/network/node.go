@@ -18,7 +18,6 @@ import (
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/consensus"
 	"github.com/bleasey/bdns/internal/index"
-	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/miekg/dns"
 )
@@ -136,10 +135,10 @@ func (n *Node) GenerateRandomNumber() []byte {
 	return randomBytes
 }
 
-func (n *Node) HandleMsgGivenType(msg GossipMessage, _ *metrics.DNSMetrics) {
+func (n *Node) HandleMsgGivenType(msg GossipEnvelope, _ *DNSMetrics) {
 	// This includes messages received from BOTH direct and broadcast mode
 	// since for now there is no difference in handling based on the mode of reception
-	metrics := metrics.GetDNSMetrics()
+	dnsMetrics := GetDNSMetrics()
 
 	switch msg.Type {
 	case DNSRequest:
@@ -149,7 +148,7 @@ func (n *Node) HandleMsgGivenType(msg GossipMessage, _ *metrics.DNSMetrics) {
 		if err != nil {
 			log.Println("Failed during unmarshalling")
 		}
-		n.DNSRequestHandler(req, msg.Sender, metrics)
+		n.DNSRequestHandler(req, msg.Sender, dnsMetrics)
 
 	case DNSResponse:
 		var res BDNSResponse
@@ -204,12 +203,6 @@ func (n *Node) HandleMsgGivenType(msg GossipMessage, _ *metrics.DNSMetrics) {
 	case MsgGetBlock:
 		n.HandleGetBlock(msg.Sender)
 
-	case MsgGetMerkle:
-		var query DNSQueryMsg
-		if err := json.Unmarshal(msg.Content, &query); err == nil {
-			n.HandleMerkleRequest(msg.Sender, query.DomainName)
-		}
-
 	case MsgDNSQuery:
 		var query DNSQueryMsg
 		err := json.Unmarshal(msg.Content, &query)
@@ -246,7 +239,7 @@ func (n *Node) ListenForDirectMessages() {
 	// Handler for dns response
 	n.P2PNetwork.Host.SetStreamHandler("/dns-response", func(s network.Stream) {
 		defer s.Close()
-		var msg GossipMessage
+		var msg GossipEnvelope
 		if err := json.NewDecoder(s).Decode(&msg); err != nil {
 			log.Println("Error decoding direct response:", err)
 			return
@@ -261,7 +254,7 @@ func (n *Node) BroadcastTransaction(tx blockchain.Transaction) {
 	n.P2PNetwork.BroadcastMessage(MsgTransaction, tx, nil)
 }
 
-func (n *Node) MakeDNSRequest(domainName string, metrics *metrics.DNSMetrics) {
+func (n *Node) MakeDNSRequest(domainName string, metrics *DNSMetrics) {
 	if records, found := GetFromCache(domainName, "A"); found {
 		if len(records) > 0 {
 			fmt.Printf("[CACHE HIT] %s -> %s\n", domainName, records[0].Value)
@@ -518,7 +511,7 @@ func (n *Node) BroadcastReveal(epoch int64) error {
 	return nil
 }
 
-func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *metrics.DNSMetrics) {
+func (n *Node) DNSRequestHandler(req BDNSRequest, reqSender string, metrics *DNSMetrics) {
 	start := time.Now()
 
 	// If this node is a light node, ask full node for answer + proof

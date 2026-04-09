@@ -213,3 +213,21 @@ func (h *RFC1035Handler) buildAllRecords(name string, records []blockchain.Recor
 	rrs = append(rrs, h.buildNSRecords(name, records, ttl)...)
 	return rrs
 }
+
+// StartDNSServer initialises and starts an RFC 1035-compliant UDP DNS server on the given port.
+func StartDNSServer(port string, node *Node) {
+	handler := NewRFC1035Handler(node)
+	mux := dns.NewServeMux()
+	mux.Handle(".", handler)
+
+	srv := &dns.Server{
+		Addr:    ":" + port,
+		Net:     "udp",
+		Handler: mux,
+	}
+	node.DNSServer = srv
+
+	if err := srv.ListenAndServe(); err != nil {
+		log.Printf("[DNS] UDP server on :%s stopped: %v", port, err)
+	}
+}

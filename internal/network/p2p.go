@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 
-	"github.com/bleasey/bdns/internal/metrics"
 	"github.com/libp2p/go-libp2p"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -19,15 +18,7 @@ type P2PNetwork struct {
 	PubSub  *pubsub.PubSub
 	Topic   *pubsub.Topic
 	Sub     *pubsub.Subscription
-	MsgChan chan GossipMessage
-}
-
-// GossipMessage structure
-type GossipMessage struct {
-	Type    MessageType
-	Sender  string // Peer ID
-	Content json.RawMessage
-	Metrics *metrics.DNSMetrics
+	MsgChan chan GossipEnvelope
 }
 
 // NewP2PNetwork initializes a libp2p node with pubsub gossip
@@ -61,7 +52,7 @@ func NewP2PNetwork(ctx context.Context, addr string, topicName string) (*P2PNetw
 		PubSub:  ps,
 		Topic:   topic,
 		Sub:     sub,
-		MsgChan: make(chan GossipMessage),
+		MsgChan: make(chan GossipEnvelope),
 	}
 
 	return network, nil
@@ -76,7 +67,7 @@ func (p *P2PNetwork) ListenForGossip() {
 			continue
 		}
 
-		var gMsg GossipMessage
+		var gMsg GossipEnvelope
 		err = json.Unmarshal(msg.Data, &gMsg)
 		if err != nil {
 			log.Println("Error decoding gossip message:", err)
@@ -93,9 +84,9 @@ func (p *P2PNetwork) ListenForGossip() {
 }
 
 // BroadcastMessage publishes a message to the gossip network
-func (p *P2PNetwork) BroadcastMessage(msgType MessageType, content interface{}, metrics *metrics.DNSMetrics) {
+func (p *P2PNetwork) BroadcastMessage(msgType MessageType, content interface{}, metrics *DNSMetrics) {
 	data, _ := json.Marshal(content)
-	gossipMsg := GossipMessage{
+	gossipMsg := GossipEnvelope{
 		Type:    msgType,
 		Sender:  p.Host.ID().String(),
 		Content: data,
@@ -124,7 +115,7 @@ func (p *P2PNetwork) DirectMessage(msgType MessageType, content interface{}, pee
 	defer stream.Close()
 
 	data, _ := json.Marshal(content)
-	responseMsg := GossipMessage{
+	responseMsg := GossipEnvelope{
 		Type:    msgType,
 		Sender:  p.Host.ID().String(),
 		Content: data,
