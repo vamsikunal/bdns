@@ -87,7 +87,10 @@ func LedgerSim() {
 	nodeA.BroadcastTransaction(*txReg)
 	fmt.Printf("[REVEAL] ledger-test.bdns — A record, fee=%d nonce=%d\n", fee, nonceA)
 
-	waitBlocks(slotInterval, slotsPerEpoch, 2)
+	// Wait for REVEAL to be mined (nonceA advances)
+	if !waitForNonce(nodeA, pubA, nonceA+1, time.Duration(slotInterval*slotsPerEpoch*8)*time.Second) {
+		fmt.Println("[WARN] REVEAL transaction not mined within timeout")
+	}
 
 	balAAfter := getBal(nodeA, pubA)
 	if balAAfter < balABefore-10 {
@@ -157,7 +160,10 @@ func LedgerSim() {
 	nodeA.BroadcastTransaction(*tx2b)
 	fmt.Printf("[REVEAL] seq1.bdns + seq2.bdns\n")
 
-	waitBlocks(slotInterval, slotsPerEpoch, 2)
+	// Wait for both REVEALs to be mined (nonceA advances by 2)
+	if !waitForNonce(nodeA, pubA, nonceA+2, time.Duration(slotInterval*slotsPerEpoch*10)*time.Second) {
+		fmt.Println("[WARN] sequential REVEAL transactions not fully mined within timeout")
+	}
 
 	qn = bestQueryNode(nodes, []string{"seq1.bdns", "seq2.bdns"})
 	currentSlot = (time.Now().Unix() - qn.Config.InitialTimestamp) / qn.Config.SlotInterval
@@ -206,7 +212,10 @@ func LedgerSim() {
 	nodeA.BroadcastTransaction(*txFund)
 	fmt.Printf("[FUND] %d B-Coins nodeA→nodeB, fee=%d nonce=%d\n", fundAmount, fee, nonceA)
 
-	waitBlocks(slotInterval, slotsPerEpoch, 2)
+	// Wait for the FUND to be mined (nonceA advances)
+	if !waitForNonce(nodeA, pubA, nonceA+1, time.Duration(slotInterval*slotsPerEpoch*8)*time.Second) {
+		fmt.Println("[WARN] FUND transaction not mined within timeout")
+	}
 
 	balBAfter := getBal(nodeA, pubB)
 	if balBAfter >= balBBefore+fundAmount {
@@ -416,7 +425,11 @@ func LedgerSim() {
 		transferOwnerHex = hex.EncodeToString(qn.IndexManager.GetOwner("ledger-test.bdns"))
 	}
 	qn.TxMutex.Unlock()
-	fmt.Printf("[INFO] query node sees owner=%s (expect nodeB=%s)\n", transferOwnerHex[:16], pubB[:16])
+	if transferOwnerHex != "" {
+		fmt.Printf("[INFO] query node sees owner=%s (expect nodeB=%s)\n", transferOwnerHex[:16], pubB[:16])
+	} else {
+		fmt.Printf("[INFO] query node sees owner=<nil> (domain not yet indexed or owner not set)\n")
+	}
 
 	pubC := hex.EncodeToString(nodeC.KeyPair.PublicKey)
 
@@ -427,7 +440,10 @@ func LedgerSim() {
 		nodeB.BroadcastTransaction(*txTransfer)
 		fmt.Printf("[TRANSFER] ledger-test.bdns nodeB→nodeC — fee=%d nonce=%d\n", fee, nonceB)
 
-		waitBlocks(slotInterval, slotsPerEpoch, 2)
+		// Wait for TRANSFER to be mined (nodeB nonce advances)
+		if !waitForNonce(nodeB, pubB, nonceB+1, time.Duration(slotInterval*slotsPerEpoch*8)*time.Second) {
+			fmt.Println("[WARN] TRANSFER transaction not mined within timeout")
+		}
 
 		qn = bestQueryNode(nodes, []string{"ledger-test.bdns"})
 		qn.TxMutex.Lock()
@@ -440,7 +456,11 @@ func LedgerSim() {
 			fmt.Println("PASS  [TRANSFER ownership] — owner is now nodeC")
 		} else {
 			metrics.record(false)
-			fmt.Printf("FAIL  [TRANSFER ownership] — owner=%s\n", tOwnerHex[:16])
+			if len(tOwnerHex) >= 16 {
+				fmt.Printf("FAIL  [TRANSFER ownership] — owner=%s\n", tOwnerHex[:16])
+			} else {
+				fmt.Printf("FAIL  [TRANSFER ownership] — owner=%s\n", tOwnerHex)
+			}
 		}
 	} else {
 		metrics.record(false)
@@ -673,12 +693,13 @@ func (m *ledgerMetrics) record(ok bool) {
 }
 
 // waitForNonce polls until the node's committed nonce >= minNonce or timeout.
-// func waitForNonce(node *network.Node, pubKeyHex string, minNonce uint64, timeout time.Duration) {
-// 	deadline := time.Now().Add(timeout)
-// 	for time.Now().Before(deadline) {
-// 		if node.BalanceLedger.GetNonce(pubKeyHex) >= minNonce {
-// 			return
-// 		}
-// 		time.Sleep(500 * time.Millisecond)
-// 	}
-// }
+func waitForNonce(node *network.Node, pubKeyHex string, minNonce uint64, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if node.BalanceLedger.GetNonce(pubKeyHex) >= minNonce {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
+}
