@@ -7,3 +7,5 @@ chaindata
 /scripts
 *.log
 /tests
+benchmark/*
+!benchmark/benchmark_test.go
