@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bleasey/bdns/client"
 	"github.com/bleasey/bdns/internal/blockchain"
 	"github.com/bleasey/bdns/internal/network"
 )
@@ -77,7 +76,12 @@ func FeatureSim() {
 	}
 
 	// COMMIT phase: send blind commits for all domains
-	type pendingCommit struct{ domain string; records []blockchain.Record; tid int; salt []byte }
+	type pendingCommit struct {
+		domain  string
+		records []blockchain.Record
+		tid     int
+		salt    []byte
+	}
 	var commits []pendingCommit
 
 	canonicalTID, canonicalSalt := registerDomain(reg, "canonical.bdns", canonicalRecords, 1, regNonce)
@@ -224,11 +228,6 @@ func FeatureSim() {
 			}
 		}
 	}
-
-	// Run auto-client DNS queries via UDP server
-	fmt.Println("\n=== Feature Sim: Auto-Client Queries ===")
-	time.Sleep(2 * time.Second)
-	client.RunAutoClient([]string{"canonical.bdns", "alias.bdns", "deep.bdns", "mx-only.bdns", "renew-me.bdns"})
 
 	// Print summary
 	fmt.Println("\n=== Feature Sim Results ===")
