@@ -581,11 +581,11 @@ func ValidateTransactions(txs []Transaction, ledger *BalanceLedger, im DomainInd
 			}
 			commitHex := hex.EncodeToString(tx.CommitHash)
 			if shadowCommit[commitHex] {
-				log.Printf("ValidateTransactions(Commit): Duplicate hash in block, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Duplicate hash in same batch, TID=%d", tx.TID)
 				return false
 			}
 			if cs != nil && cs.GetCommit(commitHex) != nil {
-				log.Printf("ValidateTransactions(Commit): Hash already pending, TID=%d", tx.TID)
+				log.Printf("ValidateTransactions(Commit): Hash already pending in CommitStore, TID=%d", tx.TID)
 				return false
 			}
 			shadowCommit[commitHex] = true

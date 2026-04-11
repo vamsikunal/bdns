@@ -93,6 +93,11 @@ func (n *Node) AddTransaction(tx *blockchain.Transaction) {
 	n.TxMutex.Lock()
 	defer n.TxMutex.Unlock()
 
+	// silently drop gossip-replayed copies of transactions that are already in the mempool.
+	if _, exists := n.TransactionPool[tx.TID]; exists {
+		return
+	}
+
 	// Build candidate list: existing pool + new tx
 	pendingList := make([]blockchain.Transaction, 0, len(n.TransactionPool)+1)
 	for _, ptx := range n.TransactionPool {

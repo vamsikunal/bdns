@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"log"
 	"sync"
 	"time"
@@ -10,7 +11,9 @@ import (
 	"github.com/bleasey/bdns/internal/network"
 	pb "github.com/bleasey/bdns/internal/proto/gatwaypb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // GatewayClient manages gRPC connections from a light node to one full node
@@ -91,6 +94,10 @@ func (c *GatewayClient) streamHeaders() {
 		for {
 			hdr, err := stream.Recv()
 			if err != nil {
+				code := status.Code(err)
+				if err == io.EOF || code == codes.Canceled || code == codes.Unavailable {
+					return
+				}
 				log.Printf("[gRPC] stream recv from %s: %v", c.addr, err)
 				break
 			}

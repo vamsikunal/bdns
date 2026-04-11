@@ -130,6 +130,9 @@ func (p *ConnectionPool) monitorHealth() {
 			_, err := c.HealthCheck()
 			p.health[i] = err == nil
 			if err != nil {
+				if s, ok := status.FromError(err); ok && s.Code() == codes.Canceled {
+					continue
+				}
 				log.Printf("[POOL] health check failed for %s: %v", p.addrs[i], err)
 			}
 		}
