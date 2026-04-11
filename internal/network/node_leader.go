@@ -150,7 +150,11 @@ func (n *Node) CreateBlockIfLeader(ctx context.Context) {
 		transactions = append(autoRevocations, transactions...)
 
 		if len(transactions) == 0 {
-			fmt.Println("No transactions to add. Skipping block creation.")
+			// No transactions broadcast a signed slot-skip attestation
+			fmt.Printf("No transactions to add. Broadcasting slot-skip for slot %d.\n", slot)
+			
+			// so all nodes can advance their local slot counter in sync.
+			n.BroadcastSlotSkip(slot)
 			continue
 		}
 
