@@ -16,10 +16,22 @@ import (
 func FeatureSim() {
 	const (
 		numNodes      = 10
-		slotInterval  = 5
+		slotInterval  = 8
 		slotsPerEpoch = 2
 		seed          = 42
 	)
+
+	// waitForNonce polls until a node's nonce reaches wantNonce or timeout elapses.
+	waitForNonce := func(node *network.Node, pubKeyHex string, wantNonce uint64, timeoutSec int) bool {
+		deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+		for time.Now().Before(deadline) {
+			if node.BalanceLedger.GetNonce(pubKeyHex) >= wantNonce {
+				return true
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		return false
+	}
 
 	var wg sync.WaitGroup
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
@@ -43,7 +55,15 @@ func FeatureSim() {
 	}
 
 	fmt.Println("[FeatureSim] Waiting for STAKEs to be mined...")
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*3) * time.Second)
+	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue // light node BalanceLedger not updated by blocks — skip nonce poll
+		}
+		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		if !waitForNonce(node, pubKeyHex, 1, slotInterval*slotsPerEpoch*5) {
+			fmt.Printf("[WARN] node%d STAKE not confirmed in time\n", i+1)
+		}
+	}
 
 	metrics := &featureMetrics{}
 
@@ -88,36 +108,36 @@ func FeatureSim() {
 	commits = append(commits, pendingCommit{"canonical.bdns", canonicalRecords, canonicalTID, canonicalSalt})
 	regNonce++
 	fmt.Println("[COMMIT] canonical.bdns")
-	time.Sleep(1 * time.Second)
 
 	aliasTID, aliasSalt := registerDomain(reg, "alias.bdns", aliasRecords, 1, regNonce)
 	commits = append(commits, pendingCommit{"alias.bdns", aliasRecords, aliasTID, aliasSalt})
 	regNonce++
 	fmt.Println("[COMMIT] alias.bdns")
-	time.Sleep(1 * time.Second)
 
 	deepTID, deepSalt := registerDomain(reg, "deep.bdns", deepRecords, 1, regNonce)
 	commits = append(commits, pendingCommit{"deep.bdns", deepRecords, deepTID, deepSalt})
 	regNonce++
 	fmt.Println("[COMMIT] deep.bdns")
-	time.Sleep(1 * time.Second)
 
 	mxTID, mxSalt := registerDomain(reg, "mx-only.bdns", mxOnlyRecords, 1, regNonce)
 	commits = append(commits, pendingCommit{"mx-only.bdns", mxOnlyRecords, mxTID, mxSalt})
 	regNonce++
 	fmt.Println("[COMMIT] mx-only.bdns")
-	time.Sleep(1 * time.Second)
 
 	renewTID, renewSalt := registerDomain(reg, "renew-me.bdns", renewableRecords, 1, regNonce)
 	commits = append(commits, pendingCommit{"renew-me.bdns", renewableRecords, renewTID, renewSalt})
 	regNonce++
 	fmt.Println("[COMMIT] renew-me.bdns")
 
-	// Wait for COMMITs to be mined and delay to pass
-	fmt.Println("\n[WAIT] Waiting for COMMITs to be mined (including delay)...")
-	time.Sleep(time.Duration(slotInterval*(slotsPerEpoch+int(blockchain.CommitMinDelay)+1)) * time.Second)
+	// Wait for COMMITs to be mined (5 nonces advanced) and delay to pass CommitMinDelay
+	fmt.Println("\n[WAIT] Waiting for COMMITs to be mined...")
+	if !waitForNonce(reg, regPubKeyHex, 5, slotInterval*slotsPerEpoch*10) {
+		fmt.Println("[WARN] COMMITs not all mined in time")
+	}
+	time.Sleep(time.Duration(slotInterval*int(blockchain.CommitMinDelay)) * time.Second)
 
 	// REVEAL phase
+	revealStartNonce := reg.BalanceLedger.GetNonce(regPubKeyHex)
 	for _, c := range commits {
 		regNonce = reg.BalanceLedger.GetNonce(regPubKeyHex)
 		revealDomain(reg, c.domain, c.records, c.tid, c.salt, 1, regNonce)
@@ -126,9 +146,11 @@ func FeatureSim() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	// Wait for registrations to be committed
-	fmt.Println("\n[WAIT] Waiting for registrations to be committed (30s)...")
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*3) * time.Second)
+	// Wait for all 5 REVEALs to be mined
+	fmt.Println("\n[WAIT] Waiting for REVEALs to be mined...")
+	if !waitForNonce(reg, regPubKeyHex, revealStartNonce+5, slotInterval*slotsPerEpoch*15) {
+		fmt.Println("[WARN] Not all REVEALs mined in time")
+	}
 
 	// Pick the node with the most domains indexed
 	allDomains := []string{"canonical.bdns", "alias.bdns", "deep.bdns", "mx-only.bdns", "renew-me.bdns"}
@@ -175,8 +197,12 @@ func FeatureSim() {
 	}()
 	wg.Wait()
 
-	// Wait for RENEW to be committed
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*2) * time.Second)
+	// Wait for RENEW to be mined
+	qnPubKeyHex := hex.EncodeToString(queryNode.KeyPair.PublicKey)
+	renewNonce := queryNode.BalanceLedger.GetNonce(qnPubKeyHex)
+	if !waitForNonce(queryNode, qnPubKeyHex, renewNonce+1, slotInterval*slotsPerEpoch*10) {
+		fmt.Println("[WARN] RENEW not mined in time")
+	}
 
 	// Type-aware resolution queries
 	fmt.Println("\n=== Feature Sim: Type-Aware Resolution Tests ===")
@@ -257,7 +283,7 @@ func registerDomain(node *network.Node, domain string, records []blockchain.Reco
 func revealDomain(node *network.Node, domain string, records []blockchain.Record,
 	commitTID int, salt []byte, fee uint64, nonce uint64) {
 	const ttl = int64(3600)
-	const slotsPerDay = int64(86400 / 5)
+	const slotsPerDay = int64(86400 / 8)
 	nextBlock := node.Blockchain.GetLatestBlock().Index + 1
 	tx := blockchain.NewRevealTransaction(domain, salt, records,
 		ttl, nextBlock, slotsPerDay, commitTID,

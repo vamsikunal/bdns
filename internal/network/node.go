@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/bleasey/bdns/internal/consensus"
 	"github.com/bleasey/bdns/internal/index"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/miekg/dns"
 )
 
@@ -71,6 +73,8 @@ type Node struct {
 	UnstakeQueue            *blockchain.UnstakeQueue
 	SlashedEvidence         map[string]bool
 	StakeMutex              sync.Mutex
+	CurrentSlot             int64
+	SlotSkipMutex           sync.Mutex
 }
 
 // Node Config
@@ -194,6 +198,14 @@ func (n *Node) HandleMsgGivenType(msg GossipEnvelope, _ *DNSMetrics) {
 			log.Println("RevealHandler error:", err)
 		}
 
+	case MsgSlotSkip:
+		var skipMsg SlotSkipAttestation
+		if err := json.Unmarshal(msg.Content, &skipMsg); err != nil {
+			log.Println("Failed to unmarshal SlotSkipAttestation:", err)
+			break
+		}
+		n.handleSlotSkip(skipMsg)
+
 	case MsgInv:
 		n.HandleINV(msg.Sender)
 
@@ -247,11 +259,54 @@ func (n *Node) ListenForDirectMessages() {
 
 		n.HandleMsgGivenType(msg, nil)
 	})
+
+	// Handler for direct transaction forwarding (fast path)
+	n.P2PNetwork.Host.SetStreamHandler("/tx-forward", func(s network.Stream) {
+		defer s.Close()
+		data, err := io.ReadAll(s)
+		if err != nil {
+			return
+		}
+		var tx blockchain.Transaction
+		if err := json.Unmarshal(data, &tx); err != nil {
+			return
+		}
+		n.AddTransaction(&tx)
+	})
 }
 
 func (n *Node) BroadcastTransaction(tx blockchain.Transaction) {
 	n.AddTransaction(&tx)
-	n.P2PNetwork.BroadcastMessage(MsgTransaction, tx, nil)
+	// Concurrent hybrid routing: gossip (censorship resistance) +
+	// direct stream to known peers (bounded-latency fast path).
+	go func() {
+		n.P2PNetwork.BroadcastMessage(MsgTransaction, tx, nil)
+	}()
+	go n.forwardToPeers(tx)
+}
+
+// forwardToPeers pushes a transaction directly to all known full peers via a
+// dedicated libp2p stream — bypassing gossip propagation delay.
+func (n *Node) forwardToPeers(tx blockchain.Transaction) {
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return
+	}
+	for _, peerID := range n.KnownFullPeers {
+		peerID := peerID
+		go func() {
+			id, err := peer.Decode(peerID)
+			if err != nil {
+				return
+			}
+			stream, err := n.P2PNetwork.Host.NewStream(context.Background(), id, "/tx-forward")
+			if err != nil {
+				return
+			}
+			defer stream.Close()
+			_, _ = stream.Write(data)
+		}()
+	}
 }
 
 func (n *Node) MakeDNSRequest(domainName string, metrics *DNSMetrics) {
@@ -595,10 +650,62 @@ func (n *Node) AddBlockHeader(header blockchain.BlockHeader) {
 
 	if len(n.HeaderChain) > 0 {
 		latest := n.HeaderChain[len(n.HeaderChain)-1]
+		// Silently drop exact duplicates (same header broadcast by multiple full-node streams).
+		if bytes.Equal(header.Hash, latest.Hash) {
+			return
+		}
 		if !bytes.Equal(header.PrevHash, latest.Hash) {
 			log.Println("Header doesn't extend chain, skipping")
 			return
 		}
 	}
 	n.HeaderChain = append(n.HeaderChain, header)
+}
+
+type SlotSkipAttestation struct {
+	Slot      int64  `json:"slot"`
+	LeaderKey []byte `json:"leader_key"`
+	Signature []byte `json:"signature"`
+}
+
+// BroadcastSlotSkip sends a signed attestation that this slot has no transactions.
+func (n *Node) BroadcastSlotSkip(slot int64) {
+	attestation := SlotSkipAttestation{
+		Slot:      slot,
+		LeaderKey: n.KeyPair.PublicKey,
+	}
+	payload := append([]byte("slot-skip:"), blockchain.IntToByteArr(slot)...)
+	payload = append(payload, n.KeyPair.PublicKey...)
+	h := sha256.Sum256(payload)
+	sig, _ := ecdsa.SignASN1(cryptoRand.Reader, &n.KeyPair.PrivateKey, h[:])
+	attestation.Signature = sig
+
+	n.P2PNetwork.BroadcastMessage(MsgSlotSkip, attestation, nil)
+}
+
+// handleSlotSkip validates and records a slot-skip attestation from the leader.
+func (n *Node) handleSlotSkip(skip SlotSkipAttestation) {
+	// Derive epoch from slot to look up the expected leader.
+	epoch := skip.Slot / n.Config.SlotsPerEpoch
+	expectedLeader := n.GetSlotLeader(epoch)
+	if !bytes.Equal(skip.LeaderKey, expectedLeader) {
+		log.Printf("[SLOT-SKIP] slot %d: signer is not the slot leader, ignoring", skip.Slot)
+		return
+	}
+	payload := append([]byte("slot-skip:"), blockchain.IntToByteArr(skip.Slot)...)
+	payload = append(payload, skip.LeaderKey...)
+	h := sha256.Sum256(payload)
+	pubKey, err := blockchain.BytesToPublicKey(skip.LeaderKey)
+	if err != nil {
+		return
+	}
+	if !ecdsa.VerifyASN1(pubKey, h[:], skip.Signature) {
+		log.Printf("[SLOT-SKIP] slot %d: invalid signature, ignoring", skip.Slot)
+		return
+	}
+	n.SlotSkipMutex.Lock()
+	if skip.Slot > n.CurrentSlot {
+		n.CurrentSlot = skip.Slot
+	}
+	n.SlotSkipMutex.Unlock()
 }
