@@ -24,7 +24,7 @@ func GatewaySim() {
 		fmt.Printf("[GatewaySim] Warning: chaindata cleanup failed: %v\n", err)
 	}
 
-	const slotInterval = 5
+	const slotInterval = 8
 	const slotsPerEpoch = 2
 	const seed = 0
 
@@ -85,15 +85,22 @@ func GatewaySim() {
 	}
 	wgStake.Wait()
 
-	// Wait for all STAKEs to be mined (nonce advances to 1).
+	// Wait for all full-node STAKEs to be mined (nonce advances to 1).
+	// Light nodes are excluded: no STAKE was submitted for them (no GatewayServer),
+	// so their nonce will never reach 1 — waiting for them burns the full timeout.
 	fmt.Println("[GatewaySim] Waiting for STAKE transactions to be mined...")
 	var wgStakeConfirm sync.WaitGroup
 	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue // no STAKE submitted for light nodes — skip confirmation
+		}
 		wgStakeConfirm.Add(1)
 		go func(i int, node *network.Node) {
 			defer wgStakeConfirm.Done()
 			pk := hex.EncodeToString(node.KeyPair.PublicKey)
-			if !waitForNonce(node, pk, 1, slotInterval*slotsPerEpoch*10) {
+			// 3 slots is generous on localhost gRPC; gRPC path is synchronous so
+			// the tx is in the leader's mempool immediately after BroadcastTransaction.
+			if !waitForNonce(node, pk, 1, slotInterval*3) {
 				fmt.Printf("[WARN] node%d STAKE not confirmed in time\n", i+1)
 			}
 		}(i, node)
@@ -260,7 +267,7 @@ func GatewaySim() {
 		check("Failover: alternate full node also resolves the domain", ok)
 	}
 
-	fmt.Printf("\n=== GatewaySim Results: %d PASS / %d FAIL ===\n", pass, pass+fail)
+	fmt.Printf("\n=== GatewaySim Results: %d PASS / %d FAIL ===\n", pass, fail)
 	if fail == 0 {
 		fmt.Println("W2W3-Gateway phase exit criterion: SATISFIED")
 	}

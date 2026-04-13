@@ -16,7 +16,7 @@ import (
 func StakeSim() {
 	const (
 		numNodes      = 6
-		slotInterval  = 5
+		slotInterval  = 8
 		slotsPerEpoch = 2
 		seed          = 71
 	)
@@ -38,6 +38,18 @@ func StakeSim() {
 	nodes := network.InitializeP2PNodes(numNodes, slotInterval, slotsPerEpoch, seed)
 	defer network.NodesCleanup(nodes)
 
+	// waitForNonce polls until a node's nonce reaches wantNonce or timeout elapses.
+	waitForNonce := func(node *network.Node, pubKeyHex string, wantNonce uint64, timeoutSec int) bool {
+		deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+		for time.Now().Before(deadline) {
+			if node.BalanceLedger.GetNonce(pubKeyHex) >= wantNonce {
+				return true
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		return false
+	}
+
 	fmt.Println("=== StakeSim: waiting for genesis block ===")
 	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
 
@@ -58,9 +70,20 @@ func StakeSim() {
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	// Wait for all STAKEs to be mined — 6 full epochs to ensure propagation
+	// Wait for all full-node STAKEs to be mined — light node's BalanceLedger
+	// is never updated by block commits (it only stores headers), so its nonce
+	// stays at 0 permanently and waitForNonce would hang until timeout.
 	fmt.Println("[StakeSim] Waiting for STAKEs to be mined...")
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*6) * time.Second)
+	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue // light node ledger not updated by blocks — skip nonce poll
+		}
+		pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
+		expectedNonce := uint64(1) // all full nodes start at nonce 0; STAKE advances to 1
+		if !waitForNonce(node, pubKeyHex, expectedNonce, slotInterval*slotsPerEpoch*5) {
+			fmt.Printf("[WARN] node%d STAKE not confirmed in time\n", i+1)
+		}
+	}
 
 	// Phase 2: StakeMapHash consensus check
 	fmt.Println("\n=== StakeSim: Phase 2 — StakeMapHash consensus ===")
@@ -174,8 +197,11 @@ func StakeSim() {
 		unstakeNode.BroadcastTransaction(*unstakeTx)
 		fmt.Printf("[UNSTAKE] submitted UNSTAKE for %d coins\n", stakedAmt)
 
-		// Wait 2 epochs for the UNSTAKE to be mined
-		time.Sleep(time.Duration(slotInterval*slotsPerEpoch*2) * time.Second)
+		// Wait for UNSTAKE to be mined (nonce advances).
+		// 3-slot timeout (24s) is generous for localhost gossip delivery.
+		if !waitForNonce(unstakeNode, pubHex5, nonce5+1, slotInterval*3) {
+			fmt.Println("[WARN] UNSTAKE not mined in time")
+		}
 
 		// Verify: stake should be reduced
 		unstakeNode.StakeMutex.Lock()

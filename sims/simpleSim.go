@@ -19,7 +19,7 @@ func SimpleSim() {
 
 	// Constants
 	const numNodes = 6
-	const slotInterval = 5
+	const slotInterval  = 8
 	const slotsPerEpoch = 2
 	const seed = 0
 	waitForNonce := func(node *network.Node, pubKeyHex string, wantNonce uint64, timeoutSec int) bool {
@@ -63,11 +63,14 @@ func SimpleSim() {
 	fmt.Println("[SimpleSim] Waiting for all STAKEs to be mined (concurrent)...")
 	var wgStake sync.WaitGroup
 	for i, node := range nodes {
+		if !node.IsFullNode {
+			continue // light node BalanceLedger not updated by blocks — skip nonce poll
+		}
 		wgStake.Add(1)
 		go func(i int, node *network.Node) {
 			defer wgStake.Done()
 			pk := hex.EncodeToString(node.KeyPair.PublicKey)
-			if !waitForNonce(node, pk, 1, slotInterval*slotsPerEpoch*12) {
+			if !waitForNonce(node, pk, 1, slotInterval*slotsPerEpoch*5) {
 				fmt.Printf("[WARN] node%d STAKE not mined in time\n", i+1)
 			}
 		}(i, node)
@@ -89,8 +92,12 @@ func SimpleSim() {
 			defer wgCommit.Done()
 			pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
 
-			if !waitForNonce(node, pubKeyHex, 1, slotInterval*slotsPerEpoch*8) {
-				fmt.Printf("[WARN] node%d STAKE not mined in time, COMMIT may fail\n", i+1)
+			// Light node BalanceLedger is never updated by blocks; skip nonce poll
+			// but still broadcast its COMMIT so it participates in the domain set.
+			if node.IsFullNode {
+				if !waitForNonce(node, pubKeyHex, 1, slotInterval*slotsPerEpoch*5) {
+					fmt.Printf("[WARN] node%d STAKE not mined in time, COMMIT may fail\n", i+1)
+				}
 			}
 
 			domains[i] = fmt.Sprintf("node%d.com", i+1)
@@ -121,8 +128,11 @@ func SimpleSim() {
 			defer wgReveal.Done()
 			pubKeyHex := hex.EncodeToString(node.KeyPair.PublicKey)
 
-			if !waitForNonce(node, pubKeyHex, 2, slotInterval*slotsPerEpoch*10) {
-				fmt.Printf("[WARN] node%d COMMIT not confirmed, REVEAL may fail\n", i+1)
+			// Light node BalanceLedger not updated by blocks — skip nonce poll.
+			if node.IsFullNode {
+				if !waitForNonce(node, pubKeyHex, 2, slotInterval*slotsPerEpoch*5) {
+					fmt.Printf("[WARN] node%d COMMIT not confirmed, REVEAL may fail\n", i+1)
+				}
 			}
 
 			ip := fmt.Sprintf("192.168.1.%d", i+1)
