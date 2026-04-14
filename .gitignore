@@ -9,3 +9,4 @@ chaindata
 /tests
 benchmark/*
 !benchmark/benchmark_test.go
+/logs

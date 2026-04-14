@@ -44,7 +44,11 @@ func LedgerSim() {
 	}
 
 	fmt.Println("[LedgerSim] Waiting for STAKEs to be mined...")
-	time.Sleep(time.Duration(slotInterval*slotsPerEpoch*3) * time.Second)
+	if !waitForNonce(nodes[0], hex.EncodeToString(nodes[0].KeyPair.PublicKey), 1, time.Duration(slotInterval*slotsPerEpoch*6)*time.Second) {
+		fmt.Println("[WARN] nodeA STAKE not confirmed — nonce may be wrong")
+	}
+	// Give other nodes time to sync
+	time.Sleep(time.Duration(slotInterval*slotsPerEpoch) * time.Second)
 
 	// Node aliases
 	nodeA := nodes[0] // TrustedRegistry — registers, lists, delists
@@ -62,8 +66,9 @@ func LedgerSim() {
 		return node.BalanceLedger.GetBalance(pubHex)
 	}
 
+	// Snapshot balance AFTER STAKEs are confirmed so fee comparison is meaningful
 	balABefore := getBal(nodeA, pubA)
-	fmt.Printf("[INFO] NodeA starting balance: %d\n", balABefore)
+	fmt.Printf("[INFO] NodeA starting balance (post-STAKE): %d\n", balABefore)
 
 	// Register the primary test domain via COMMIT→REVEAL
 	fmt.Println("\n=== Ledger Sim: Fee & Nonce Tests ===")
@@ -93,7 +98,8 @@ func LedgerSim() {
 	}
 
 	balAAfter := getBal(nodeA, pubA)
-	if balAAfter < balABefore-10 {
+	// COMMIT+REVEAL = 2 fees; allow up to 5 fees of slippage (e.g. tiny timing differences)
+	if balAAfter < balABefore-5 {
 		metrics.record(false)
 		fmt.Printf("FAIL  [REGISTER fee] — balance dropped too much: %d→%d\n", balABefore, balAAfter)
 	} else {

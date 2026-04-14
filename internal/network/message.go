@@ -19,6 +19,7 @@ const (
 	MsgMerkleProof  MessageType = "MERKLE_PROOF"
 	MsgCommitment   MessageType = "DRG_COMMITMENT"
 	MsgReveal       MessageType = "DRG_REVEAL"
+	MsgSlotSkip     MessageType = "SLOT_SKIP"
 )
 
 // BDNSRequest is the legacy DNS request payload sent over gossip.
